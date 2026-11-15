@@ -1,0 +1,14 @@
+# Compiled classes
+out/
+*.class
+
+# Personal habit data (created at runtime)
+habits.txt
+habits.txt.tmp
+
+# IDE / OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
