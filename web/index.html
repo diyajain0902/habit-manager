@@ -20,6 +20,7 @@
       <button class="tab" role="tab" data-tab="today" aria-selected="true">Today</button>
       <button class="tab" role="tab" data-tab="calendar" aria-selected="false">Calendar</button>
       <button class="tab" role="tab" data-tab="highlights" aria-selected="false">Highlights</button>
+      <button class="tab" role="tab" data-tab="settings" aria-selected="false">Settings</button>
     </nav>
   </header>
 
@@ -35,7 +36,9 @@
 
   <div class="toast" id="toast" role="status" hidden></div>
   <div class="modal-backdrop" id="modal" hidden></div>
+  <div class="notices" id="notices" aria-live="assertive"></div>
 
+  <script src="charts.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

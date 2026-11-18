@@ -30,7 +30,8 @@ class StaticFileHandler implements HttpHandler {
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         try {
-            if (!exchange.getRequestMethod().equals("GET")) {
+            String method = exchange.getRequestMethod();
+            if (!method.equals("GET") && !method.equals("HEAD")) {
                 send(exchange, 405, "text/plain; charset=utf-8", "Method not allowed".getBytes(StandardCharsets.UTF_8));
                 return;
             }
@@ -58,6 +59,10 @@ class StaticFileHandler implements HttpHandler {
     private static void send(HttpExchange exchange, int status, String contentType, byte[] body) throws IOException {
         exchange.getResponseHeaders().set("Content-Type", contentType);
         exchange.getResponseHeaders().set("Cache-Control", "no-cache");
+        if (exchange.getRequestMethod().equals("HEAD")) {
+            exchange.sendResponseHeaders(status, -1); // headers only
+            return;
+        }
         exchange.sendResponseHeaders(status, body.length);
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(body);

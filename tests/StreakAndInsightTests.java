@@ -255,13 +255,13 @@ public class StreakAndInsightTests {
             service.addHabit("Meditate");
             service.checkIn("meditate");
             check("service: check in is saved straight away", true,
-                    Files.readString(file).contains("Meditate|2024-05-10|2024-05-10"));
+                    new FileStorage(file).load().habits().get(0).isDoneOn(today));
             check("service: second check in is not duplicated", false, service.checkIn("Meditate"));
             service.renameHabit("Meditate", "Breathe");
-            check("service: rename is saved", true, Files.readString(file).startsWith("Breathe|"));
+            check("service: rename is saved", "Breathe", new FileStorage(file).load().habits().get(0).getName());
             checkThrows("service: unknown habit is rejected", () -> service.checkIn("Nope"));
             service.deleteHabit("breathe");
-            check("service: delete is saved", true, Files.readString(file).isBlank());
+            check("service: delete is saved", true, new FileStorage(file).load().habits().isEmpty());
         } finally {
             Files.deleteIfExists(file);
         }

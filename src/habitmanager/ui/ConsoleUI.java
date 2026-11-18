@@ -126,14 +126,14 @@ public class ConsoleUI {
         out.println("Habits for " + today + ":");
         int width = nameColumnWidth();
         out.printf("    %-" + width + "s  %-5s  %-7s  %s%n", "Habit", "Today", "Streak", "Completion");
-        List<Habit> habits = manager.listHabits();
+        List<Habit> habits = activeHabits();
         for (int i = 0; i < habits.size(); i++) {
             Habit habit = habits.get(i);
             out.printf("%2d. %-" + width + "s  %-5s  %-7s  %.1f%%%n",
                     i + 1,
                     habit.getName(),
                     habit.isDoneOn(today) ? DONE : NOT_DONE,
-                    StreakCalculator.currentStreak(habit, today) + "d",
+                    StreakCalculator.currentStreak(habit, today) + unitLetter(habit),
                     InsightEngine.completionPercentage(habit, today));
         }
     }
@@ -227,11 +227,11 @@ public class ConsoleUI {
         LocalDate today = today();
         int width = nameColumnWidth();
         out.printf("%-" + width + "s  %-8s  %s%n", "Habit", "Current", "Longest");
-        for (Habit habit : manager.listHabits()) {
+        for (Habit habit : activeHabits()) {
             out.printf("%-" + width + "s  %-8s  %s%n",
                     habit.getName(),
-                    StreakCalculator.currentStreak(habit, today) + "d",
-                    StreakCalculator.longestStreak(habit) + "d");
+                    StreakCalculator.currentStreak(habit, today) + unitLetter(habit),
+                    StreakCalculator.longestStreak(habit) + unitLetter(habit));
         }
     }
 
@@ -241,7 +241,7 @@ public class ConsoleUI {
         }
         LocalDate today = today();
         printSummary(InsightEngine.overallSummary(manager.listHabits(), today));
-        for (Habit habit : manager.listHabits()) {
+        for (Habit habit : activeHabits()) {
             out.println();
             printHabitInsights(habit, today);
         }
@@ -420,7 +420,7 @@ public class ConsoleUI {
         if (printIfEmpty()) {
             return Optional.empty();
         }
-        List<Habit> habits = manager.listHabits();
+        List<Habit> habits = activeHabits();
         out.println(question);
         for (int i = 0; i < habits.size(); i++) {
             out.println("  " + (i + 1) + ". " + habits.get(i).getName());
@@ -431,15 +431,25 @@ public class ConsoleUI {
     }
 
     private boolean printIfEmpty() {
-        if (manager.isEmpty()) {
+        if (activeHabits().isEmpty()) {
             out.println("You have no habits yet. Add one with option 2, or load demo data with option 11.");
             return true;
         }
         return false;
     }
 
+    /** Archived habits (set from the web dashboard) are hidden from the console menus. */
+    private List<Habit> activeHabits() {
+        return manager.listHabits().stream().filter(h -> !h.isArchived()).toList();
+    }
+
+    /** "d" for day streaks, "w" for times-per-week habits. */
+    private static String unitLetter(Habit habit) {
+        return StreakCalculator.unit(habit).substring(0, 1);
+    }
+
     private int nameColumnWidth() {
-        int longest = manager.listHabits().stream().mapToInt(h -> h.getName().length()).max().orElse(0);
+        int longest = activeHabits().stream().mapToInt(h -> h.getName().length()).max().orElse(0);
         return Math.max("Habit".length(), longest);
     }
 

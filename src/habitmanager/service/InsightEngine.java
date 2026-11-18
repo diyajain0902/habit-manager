@@ -1,6 +1,7 @@
 package habitmanager.service;
 
 import habitmanager.model.Habit;
+import habitmanager.model.Schedule;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
@@ -12,20 +13,33 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-/** Turns raw check-in data into percentages, weekday patterns and summaries. */
+/**
+ * Turns raw check-in data into percentages, weekday patterns and summaries.
+ * Every calculation respects the habit's schedule, so rest days never count against it.
+ */
 public final class InsightEngine {
 
-    /** A habit that has had no check in for this many days (including today) needs attention. */
+    /** A daily habit with no check in for this many days (including today) needs attention. */
     public static final int ATTENTION_WINDOW_DAYS = 3;
 
     private InsightEngine() {
     }
 
-    /** One day in a habit's history. beforeCreation is true for days the habit did not exist yet. */
-    public record DayStatus(LocalDate date, boolean done, boolean beforeCreation) {
+    /**
+     * One day in a habit's history. beforeCreation is true for days the habit did not
+     * exist yet; scheduled is false on rest days of a specific-weekdays habit.
+     */
+    public record DayStatus(LocalDate date, boolean done, boolean beforeCreation, boolean scheduled) {
     }
 
-    /** Snapshot of how all habits are doing today. */
+    /** Progress towards a weekly goal (times-per-week habits). */
+    public record WeekProgress(int done, int goal) {
+    }
+
+    /**
+     * Snapshot of how all active habits are doing today. doneToday / totalHabits only count
+     * habits that are due today, so rest days and met weekly goals do not drag it down.
+     */
     public record OverallSummary(int doneToday,
                                  int totalHabits,
                                  Optional<Habit> strongest,
@@ -33,18 +47,67 @@ public final class InsightEngine {
                                  List<Habit> needingAttention) {
     }
 
+    // ---------------------------------------------------------------- completion %
+
     /**
-     * Completed days / days since creation (both ends inclusive) x 100, rounded to 1 decimal.
-     * A habit created today has 1 tracked day, so there is never a divide by zero.
+     * Share of expected check ins that happened since the habit was created, x 100,
+     * rounded to 1 decimal. Today is included, like in the original daily rule.
+     * <ul>
+     *   <li>Every day: completed days / days since creation (inclusive).</li>
+     *   <li>Specific weekdays: completed scheduled days / scheduled days so far.</li>
+     *   <li>X times a week: per week, min(done, expected) / expected, where expected is the
+     *       goal, capped by how many days of that week the habit existed.</li>
+     * </ul>
+     * Never divides by zero: with nothing expected yet the result is 0.
      */
     public static double completionPercentage(Habit habit, LocalDate today) {
-        long trackedDays = daysTracked(habit, today);
-        if (trackedDays <= 0) {
+        LocalDate created = habit.getCreatedDate();
+        if (today.isBefore(created)) {
             return 0.0;
         }
-        long completed = completionsInRange(habit, today);
-        return roundToOneDecimal(completed * 100.0 / trackedDays);
+        return switch (habit.getSchedule().getType()) {
+            case DAILY -> percentage(StreakCalculator.completionsBetween(habit, created, today),
+                    ChronoUnit.DAYS.between(created, today) + 1);
+            case WEEKDAYS -> scheduledDaysPercentage(habit, today);
+            case WEEKLY -> weeklyPercentage(habit, today);
+        };
     }
+
+    private static double scheduledDaysPercentage(Habit habit, LocalDate today) {
+        Schedule schedule = habit.getSchedule();
+        LocalDate created = habit.getCreatedDate();
+        long expected = schedule.getDays().stream().mapToLong(d -> occurrencesOf(d, created, today)).sum();
+        long done = habit.getCompletedDates().subSet(created, true, today, true).stream()
+                .filter(schedule::isScheduledOn)
+                .count();
+        return percentage(done, expected);
+    }
+
+    private static double weeklyPercentage(Habit habit, LocalDate today) {
+        int goal = habit.getSchedule().getTimesPerWeek();
+        LocalDate created = habit.getCreatedDate();
+        long expected = 0;
+        long achieved = 0;
+        for (LocalDate monday = StreakCalculator.weekStart(created); !monday.isAfter(today); monday = monday.plusWeeks(1)) {
+            LocalDate from = monday.isBefore(created) ? created : monday;
+            LocalDate to = monday.plusDays(6).isAfter(today) ? today : monday.plusDays(6);
+            int daysAlive = (int) ChronoUnit.DAYS.between(from, to) + 1;
+            int expectedThisWeek = Math.min(goal, daysAlive);
+            expected += expectedThisWeek;
+            achieved += Math.min(StreakCalculator.completionsBetween(habit, from, to), expectedThisWeek);
+        }
+        return percentage(achieved, expected);
+    }
+
+    private static double percentage(long done, long expected) {
+        if (expected <= 0) {
+            return 0.0;
+        }
+        double value = Math.min(100.0, done * 100.0 / expected);
+        return Math.round(value * 10.0) / 10.0;
+    }
+
+    // ---------------------------------------------------------------- weekday rates
 
     /**
      * Completion rate for each weekday, from 0.0 to 1.0.
@@ -52,16 +115,18 @@ public final class InsightEngine {
      * Raw counts would be misleading: in a 10 day window starting on a Monday there are
      * two Mondays but only one Friday. So each weekday's completions are divided by the
      * number of times that weekday actually occurred between createdDate and today.
-     * Weekdays that have not occurred yet are left out of the map.
+     * Weekdays that have not occurred yet, and rest days of the schedule, are left out.
      */
     public static EnumMap<DayOfWeek, Double> weekdayRates(Habit habit, LocalDate today) {
         EnumMap<DayOfWeek, Integer> completions = new EnumMap<>(DayOfWeek.class);
-        for (LocalDate date : habit.getCompletedDates().subSet(habit.getCreatedDate(), true, today, true)) {
-            completions.merge(date.getDayOfWeek(), 1, Integer::sum);
+        if (!today.isBefore(habit.getCreatedDate())) {
+            for (LocalDate date : habit.getCompletedDates().subSet(habit.getCreatedDate(), true, today, true)) {
+                completions.merge(date.getDayOfWeek(), 1, Integer::sum);
+            }
         }
 
         EnumMap<DayOfWeek, Double> rates = new EnumMap<>(DayOfWeek.class);
-        for (DayOfWeek day : DayOfWeek.values()) {
+        for (DayOfWeek day : habit.getSchedule().getDays()) {
             long occurrences = occurrencesOf(day, habit.getCreatedDate(), today);
             if (occurrences > 0) {
                 rates.put(day, completions.getOrDefault(day, 0) / (double) occurrences);
@@ -86,29 +151,84 @@ public final class InsightEngine {
                 .map(Map.Entry::getKey);
     }
 
+    // ---------------------------------------------------------------- today
+
+    /**
+     * Whether the habit still "counts" today: always for daily habits, only on chosen days
+     * for weekday habits, and for weekly habits until this week's goal is met (a day that
+     * is already done stays due, so it still shows as done).
+     */
+    public static boolean isDueOn(Habit habit, LocalDate date) {
+        if (habit.isArchived() || date.isBefore(habit.getCreatedDate())) {
+            return false;
+        }
+        Schedule schedule = habit.getSchedule();
+        return switch (schedule.getType()) {
+            case DAILY -> true;
+            case WEEKDAYS -> schedule.isScheduledOn(date);
+            case WEEKLY -> habit.isDoneOn(date)
+                    || StreakCalculator.completionsBetween(habit, StreakCalculator.weekStart(date), date.minusDays(1))
+                    < schedule.getTimesPerWeek();
+        };
+    }
+
+    /** Check ins this week (Mon-Sun) against the weekly goal. */
+    public static WeekProgress weekProgress(Habit habit, LocalDate today) {
+        int done = StreakCalculator.completionsInWeek(habit, StreakCalculator.weekStart(today));
+        return new WeekProgress(done, habit.getSchedule().getTimesPerWeek());
+    }
+
     public static OverallSummary overallSummary(List<Habit> habits, LocalDate today) {
-        int doneToday = (int) habits.stream().filter(h -> h.isDoneOn(today)).count();
+        List<Habit> active = habits.stream().filter(h -> !h.isArchived()).toList();
+        List<Habit> dueToday = active.stream().filter(h -> isDueOn(h, today)).toList();
+        int doneToday = (int) dueToday.stream().filter(h -> h.isDoneOn(today)).count();
         Comparator<Habit> byCompletion = Comparator.comparingDouble(h -> completionPercentage(h, today));
 
-        Optional<Habit> strongest = habits.stream().max(byCompletion);
-        Optional<Habit> weakest = habits.stream().min(byCompletion);
-        List<Habit> needingAttention = habits.stream()
+        Optional<Habit> strongest = active.stream().max(byCompletion);
+        Optional<Habit> weakest = active.stream().min(byCompletion);
+        List<Habit> needingAttention = active.stream()
                 .filter(h -> needsAttention(h, today))
                 .toList();
-        return new OverallSummary(doneToday, habits.size(), strongest, weakest, needingAttention);
+        return new OverallSummary(doneToday, dueToday.size(), strongest, weakest, needingAttention);
     }
 
     /**
-     * True when the habit has existed for the whole attention window (today and the two
-     * days before) but was not completed on any of those days. Brand new habits are not
-     * flagged, since they have not had a fair chance yet.
+     * True when a habit has been neglected:
+     * <ul>
+     *   <li>Every day: existed for the whole window (today and the two days before) and was
+     *       not done on any of them.</li>
+     *   <li>Specific weekdays: its last 3 scheduled days were all missed.</li>
+     *   <li>X times a week: no check in at all in the last 7 days.</li>
+     * </ul>
+     * Brand new habits are not flagged, since they have not had a fair chance yet.
      */
     public static boolean needsAttention(Habit habit, LocalDate today) {
-        LocalDate windowStart = today.minusDays(ATTENTION_WINDOW_DAYS - 1);
+        if (habit.isArchived()) {
+            return false;
+        }
+        return switch (habit.getSchedule().getType()) {
+            case DAILY -> nothingDoneSince(habit, today.minusDays(ATTENTION_WINDOW_DAYS - 1), today);
+            case WEEKLY -> nothingDoneSince(habit, today.minusDays(6), today);
+            case WEEKDAYS -> lastScheduledDaysMissed(habit, today);
+        };
+    }
+
+    private static boolean nothingDoneSince(Habit habit, LocalDate windowStart, LocalDate today) {
         if (habit.getCreatedDate().isAfter(windowStart)) {
             return false;
         }
-        return habit.getCompletedDates().subSet(windowStart, true, today, true).isEmpty();
+        return StreakCalculator.completionsBetween(habit, windowStart, today) == 0;
+    }
+
+    private static boolean lastScheduledDaysMissed(Habit habit, LocalDate today) {
+        List<LocalDate> lastScheduled = new ArrayList<>();
+        for (LocalDate day = today; lastScheduled.size() < ATTENTION_WINDOW_DAYS
+                && !day.isBefore(habit.getCreatedDate()); day = day.minusDays(1)) {
+            if (habit.getSchedule().isScheduledOn(day)) {
+                lastScheduled.add(day);
+            }
+        }
+        return lastScheduled.size() == ATTENTION_WINDOW_DAYS && lastScheduled.stream().noneMatch(habit::isDoneOn);
     }
 
     /** The last {@code days} days ending today, oldest first. */
@@ -117,21 +237,9 @@ public final class InsightEngine {
         for (int offset = days - 1; offset >= 0; offset--) {
             LocalDate date = today.minusDays(offset);
             boolean beforeCreation = date.isBefore(habit.getCreatedDate());
-            result.add(new DayStatus(date, habit.isDoneOn(date), beforeCreation));
+            result.add(new DayStatus(date, habit.isDoneOn(date), beforeCreation, habit.getSchedule().isScheduledOn(date)));
         }
         return result;
-    }
-
-    private static long daysTracked(Habit habit, LocalDate today) {
-        return ChronoUnit.DAYS.between(habit.getCreatedDate(), today) + 1;
-    }
-
-    /** Only counts check ins inside [createdDate, today], so stray dates cannot push % over 100. */
-    private static long completionsInRange(Habit habit, LocalDate today) {
-        if (today.isBefore(habit.getCreatedDate())) {
-            return 0;
-        }
-        return habit.getCompletedDates().subSet(habit.getCreatedDate(), true, today, true).size();
     }
 
     /**
@@ -148,9 +256,5 @@ public final class InsightEngine {
         long leftoverDays = totalDays % 7;
         int stepsFromStart = (day.getValue() - start.getDayOfWeek().getValue() + 7) % 7;
         return fullWeeks + (stepsFromStart < leftoverDays ? 1 : 0);
-    }
-
-    private static double roundToOneDecimal(double value) {
-        return Math.round(value * 10.0) / 10.0;
     }
 }
