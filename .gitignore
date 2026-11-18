@@ -5,6 +5,8 @@ out/
 # Personal habit data (created at runtime)
 habits.txt
 habits.txt.tmp
+habits.txt.v1.bak
+settings.properties
 
 # IDE / OS files
 .idea/

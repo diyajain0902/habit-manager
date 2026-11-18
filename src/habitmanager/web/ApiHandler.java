@@ -2,7 +2,13 @@ package habitmanager.web;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import habitmanager.desktop.StartupManager;
+import habitmanager.model.Schedule;
+import habitmanager.reminders.NotificationCenter;
+import habitmanager.reminders.ReminderEngine;
+import habitmanager.service.HabitManager.HabitDetails;
 import habitmanager.service.HabitService;
+import habitmanager.settings.Settings;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -10,25 +16,42 @@ import java.io.UncheckedIOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
- * JSON API used by the dashboard. Every successful call answers with the full,
- * freshly computed state so the page can simply re-render.
+ * JSON API used by the dashboard. Changes answer with the full, freshly computed state
+ * so the page can simply re-render.
  *
+ * <pre>
  * GET  /api/state
- * POST /api/habits/add      name
- * POST /api/habits/rename   name, newName
- * POST /api/habits/delete   name
- * POST /api/checkin         name
- * POST /api/undo            name
- * POST /api/toggle          name, date (yyyy-MM-dd)
+ * GET  /api/settings
+ * GET  /api/notifications?after=ID
+ * POST /api/habits/add       name [+ details]
+ * POST /api/habits/update    name, newName [+ details]
+ * POST /api/habits/rename    name, newName
+ * POST /api/habits/delete    name
+ * POST /api/habits/archive   name, archived (true/false)
+ * POST /api/habits/move      name, index
+ * POST /api/checkin          name
+ * POST /api/undo             name
+ * POST /api/toggle           name, date
+ * POST /api/progress         name, delta [, date]
+ * POST /api/note             name, note [, date]
  * POST /api/demo
+ * POST /api/settings         remindersEnabled, nudgeEnabled, nudgeTime, streakAlertEnabled,
+ *                            streakAlertTime, dayEndsAt, startAtLogin
+ * POST /api/notifications/snooze   name, minutes
+ * POST /api/notifications/test
  *
- * POST bodies are application/x-www-form-urlencoded.
+ * details: schedule (DAILY | WEEKDAYS | WEEKLY), days (MON,WED,...), timesPerWeek,
+ *          target, reminder (HH:mm or empty), color (0-5 or empty), emoji
+ * </pre>
+ * POST bodies are application/x-www-form-urlencoded. Dates are yyyy-MM-dd, times HH:mm.
  */
 class ApiHandler implements HttpHandler {
 
@@ -41,10 +64,17 @@ class ApiHandler implements HttpHandler {
 
     private final HabitService service;
     private final List<String> loadWarnings;
+    private final NotificationCenter notifications;
+    private final StartupManager startup;
+    private final boolean trayAvailable;
 
-    ApiHandler(HabitService service, List<String> loadWarnings) {
+    ApiHandler(HabitService service, List<String> loadWarnings, NotificationCenter notifications,
+               StartupManager startup, boolean trayAvailable) {
         this.service = service;
         this.loadWarnings = loadWarnings;
+        this.notifications = notifications;
+        this.startup = startup;
+        this.trayAvailable = trayAvailable;
     }
 
     @Override
@@ -52,8 +82,8 @@ class ApiHandler implements HttpHandler {
         try {
             String path = exchange.getRequestURI().getPath();
             String method = exchange.getRequestMethod();
-            if (method.equals("GET") && path.equals("/api/state")) {
-                sendState(exchange);
+            if (method.equals("GET")) {
+                handleGet(exchange, path);
             } else if (method.equals("POST")) {
                 handlePost(exchange, path);
             } else {
@@ -70,20 +100,49 @@ class ApiHandler implements HttpHandler {
         }
     }
 
+    private void handleGet(HttpExchange exchange, String path) throws IOException {
+        switch (path) {
+            case "/api/state" -> sendState(exchange);
+            case "/api/settings" -> sendSettings(exchange);
+            case "/api/notifications" -> {
+                Map<String, String> query = parseUrlEncoded(exchange.getRequestURI().getRawQuery());
+                long after = query.containsKey("after") ? parseLong(query.get("after"), "after") : 0;
+                sendJson(exchange, 200, StateSerializer.noticesJson(notifications.after(after), notifications.latestId()));
+            }
+            default -> sendError(exchange, 404, "Not found.");
+        }
+    }
+
     private void handlePost(HttpExchange exchange, String path) throws IOException {
         if (exchange.getRequestHeaders().getFirst(CLIENT_HEADER) == null) {
             sendError(exchange, 403, "Missing " + CLIENT_HEADER + " header.");
             return;
         }
-        Map<String, String> form = parseForm(exchange);
+        Map<String, String> form = parseUrlEncoded(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
         switch (path) {
-            case "/api/habits/add" -> service.addHabit(form.get("name"));
+            case "/api/habits/add" -> service.addHabit(details(form, form.get("name")));
+            case "/api/habits/update" -> service.updateHabit(required(form, "name"), details(form, form.get("newName")));
             case "/api/habits/rename" -> service.renameHabit(required(form, "name"), form.get("newName"));
             case "/api/habits/delete" -> service.deleteHabit(required(form, "name"));
+            case "/api/habits/archive" -> service.setArchived(required(form, "name"), bool(form, "archived", true));
+            case "/api/habits/move" -> service.moveHabit(required(form, "name"), parseInt(required(form, "index"), "index"));
             case "/api/checkin" -> service.checkIn(required(form, "name"));
             case "/api/undo" -> service.undoToday(required(form, "name"));
             case "/api/toggle" -> service.toggleDate(required(form, "name"), LocalDate.parse(required(form, "date")));
+            case "/api/progress" -> service.addProgress(required(form, "name"), date(form),
+                    parseInt(required(form, "delta"), "delta"));
+            case "/api/note" -> service.setNote(required(form, "name"), date(form), form.get("note"));
             case "/api/demo" -> service.loadDemoData();
+            case "/api/notifications/snooze" -> service.snooze(required(form, "name"),
+                    form.containsKey("minutes") ? parseInt(form.get("minutes"), "minutes") : 10);
+            case "/api/notifications/test" -> notifications.publish(new ReminderEngine.Reminder(
+                    ReminderEngine.Kind.NUDGE, null, "Test notification", "Reminders are working. Have a lovely day!"),
+                    service.now());
+            case "/api/settings" -> {
+                updateSettings(form);
+                sendSettings(exchange);
+                return;
+            }
             default -> {
                 sendError(exchange, 404, "Not found.");
                 return;
@@ -92,8 +151,123 @@ class ApiHandler implements HttpHandler {
         sendState(exchange);
     }
 
+    // ---------------------------------------------------------------- parsing requests
+
+    /** Reads the habit fields the add / edit dialog sends. Missing fields use plain defaults. */
+    private static HabitDetails details(Map<String, String> form, String name) {
+        return new HabitDetails(
+                name,
+                schedule(form),
+                form.containsKey("target") && !form.get("target").isBlank() ? parseInt(form.get("target"), "Target") : 1,
+                optionalTime(form.get("reminder"), "Reminder time"),
+                form.containsKey("color") && !form.get("color").isBlank() ? parseInt(form.get("color"), "Colour") : null,
+                form.get("emoji"));
+    }
+
+    private static Schedule schedule(Map<String, String> form) {
+        String type = form.getOrDefault("schedule", "DAILY").trim().toUpperCase(Locale.ROOT);
+        return switch (type) {
+            case "DAILY", "" -> Schedule.daily();
+            case "WEEKDAYS" -> Schedule.onDays(Schedule.parseDays(form.getOrDefault("days", "")));
+            case "WEEKLY" -> Schedule.timesPerWeek(parseInt(form.getOrDefault("timesPerWeek", ""), "Times per week"));
+            default -> throw new IllegalArgumentException("Unknown schedule \"" + type + "\".");
+        };
+    }
+
+    private void updateSettings(Map<String, String> form) throws IOException {
+        Settings current = service.getSettings();
+        Settings updated = new Settings(
+                bool(form, "remindersEnabled", current.remindersEnabled()),
+                bool(form, "nudgeEnabled", current.nudgeEnabled()),
+                timeOr(form, "nudgeTime", current.nudgeTime(), "Evening nudge time"),
+                bool(form, "streakAlertEnabled", current.streakAlertEnabled()),
+                timeOr(form, "streakAlertTime", current.streakAlertTime(), "Streak alert time"),
+                timeOr(form, "dayEndsAt", current.dayEndsAt(), "Day end time"));
+        service.updateSettings(updated);
+        if (form.containsKey("startAtLogin") && startup != null) {
+            boolean wanted = bool(form, "startAtLogin", false);
+            if (wanted != startup.isEnabled()) {
+                startup.setEnabled(wanted);
+            }
+        }
+    }
+
+    private LocalDate date(Map<String, String> form) {
+        String text = form.get("date");
+        return text == null || text.isBlank() ? service.today() : LocalDate.parse(text.trim());
+    }
+
+    private static LocalTime optionalTime(String text, String what) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        try {
+            return LocalTime.parse(text.trim());
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(what + " must look like 07:30.");
+        }
+    }
+
+    private static LocalTime timeOr(Map<String, String> form, String key, LocalTime fallback, String what) {
+        LocalTime time = optionalTime(form.get(key), what);
+        return time == null ? fallback : time;
+    }
+
+    private static boolean bool(Map<String, String> form, String key, boolean fallback) {
+        String value = form.get(key);
+        return value == null || value.isBlank() ? fallback : Boolean.parseBoolean(value.trim());
+    }
+
+    private static int parseInt(String text, String what) {
+        try {
+            return Integer.parseInt(text.trim());
+        } catch (NumberFormatException | NullPointerException e) {
+            throw new IllegalArgumentException(what + " must be a whole number.");
+        }
+    }
+
+    private static long parseLong(String text, String what) {
+        try {
+            return Long.parseLong(text.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(what + " must be a whole number.");
+        }
+    }
+
+    private static String required(Map<String, String> form, String key) {
+        String value = form.get(key);
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("Missing \"" + key + "\".");
+        }
+        return value;
+    }
+
+    private static Map<String, String> parseUrlEncoded(String text) {
+        Map<String, String> values = new HashMap<>();
+        if (text == null) {
+            return values;
+        }
+        for (String pair : text.split("&")) {
+            if (pair.isEmpty()) {
+                continue;
+            }
+            int eq = pair.indexOf('=');
+            String key = eq < 0 ? pair : pair.substring(0, eq);
+            String value = eq < 0 ? "" : pair.substring(eq + 1);
+            values.put(URLDecoder.decode(key, StandardCharsets.UTF_8), URLDecoder.decode(value, StandardCharsets.UTF_8));
+        }
+        return values;
+    }
+
+    // ---------------------------------------------------------------- responses
+
     private void sendState(HttpExchange exchange) throws IOException {
-        sendJson(exchange, 200, StateSerializer.toJson(service.habits(), service.today(), loadWarnings));
+        LocalDate today = service.today();
+        sendJson(exchange, 200, service.read(habits -> StateSerializer.toJson(habits, today, loadWarnings)));
+    }
+
+    private void sendSettings(HttpExchange exchange) throws IOException {
+        sendJson(exchange, 200, StateSerializer.settingsJson(service.getSettings(), startup, trayAvailable));
     }
 
     private static void sendError(HttpExchange exchange, int status, String message) throws IOException {
@@ -108,28 +282,5 @@ class ApiHandler implements HttpHandler {
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(body);
         }
-    }
-
-    private static Map<String, String> parseForm(HttpExchange exchange) throws IOException {
-        String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-        Map<String, String> form = new HashMap<>();
-        for (String pair : body.split("&")) {
-            if (pair.isEmpty()) {
-                continue;
-            }
-            int eq = pair.indexOf('=');
-            String key = eq < 0 ? pair : pair.substring(0, eq);
-            String value = eq < 0 ? "" : pair.substring(eq + 1);
-            form.put(URLDecoder.decode(key, StandardCharsets.UTF_8), URLDecoder.decode(value, StandardCharsets.UTF_8));
-        }
-        return form;
-    }
-
-    private static String required(Map<String, String> form, String key) {
-        String value = form.get(key);
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException("Missing \"" + key + "\".");
-        }
-        return value;
     }
 }

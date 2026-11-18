@@ -4,6 +4,7 @@
  * Habit Manager dashboard. Plain JavaScript, no libraries.
  * The Java server computes every number (streaks, %, weekday rates); this file only
  * draws them. User text is always inserted with textContent / text nodes, never as HTML.
+ * The Highlights graphs live in charts.js.
  */
 
 // ------------------------------------------------------------------ constants & state
@@ -16,17 +17,27 @@ const PALETTE = [
   { soft: '#c6eaf0', deep: '#4aafc2', tint: '#ecf8fa' }, // aqua
   { soft: '#c2d3f6', deep: '#5a84d3', tint: '#edf2fd' }, // cornflower
 ];
+const PALETTE_NAMES = ['Periwinkle', 'Lavender', 'Sky', 'Lilac', 'Aqua', 'Cornflower'];
 const WEEKDAYS = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'];
 const WEEKDAY_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const DAY_CODES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+const EMOJI_CHOICES = ['💧', '🏃', '📚', '🧘', '💪', '🥗', '😴', '🧠', '✍️', '🎵', '🧹', '💊', '🚶', '🦷', '☀️', '🫧'];
 const LINE_COLOR = '#e7e9f6';
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const NOTICE_POLL_MS = 20000;
 
 const ui = {
   tab: 'today',
   data: null,
+  settings: null,
   calendarHabit: null,
   calendarMonth: null,
+  calendarDay: null,
   highlightHabit: null,
+  archivedOpen: false,
+  dragName: null,
+  focusHandle: null,
+  lastNoticeId: null,
 };
 
 // ------------------------------------------------------------------ DOM helpers
@@ -38,13 +49,15 @@ function append(node, children) {
   }
 }
 
-/** Creates an HTML element. props: class, text, style, on<event>, or any attribute. */
+/** Creates an HTML element. props: class, text, on<event>, or any attribute. */
 function h(tag, props = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
     if (value === null || value === undefined || value === false) continue;
     if (key === 'class') node.className = value;
     else if (key === 'text') node.textContent = value;
+    else if (key === 'value') node.value = value;
+    else if (key === 'checked') node.checked = Boolean(value);
     else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
     else node.setAttribute(key, value === true ? '' : value);
   }
@@ -77,14 +90,24 @@ function parseISO(text) {
   return new Date(y, m - 1, d);
 }
 
+/** "07:30" -> "7:30 AM" */
+function formatTime(hhmm) {
+  const [hours, minutes] = hhmm.split(':').map(Number);
+  return new Date(2000, 0, 1, hours, minutes).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
 // ------------------------------------------------------------------ data helpers
 
-const habits = () => ui.data ? ui.data.habits : [];
+const habits = () => (ui.data ? ui.data.habits : []);
+const activeHabits = () => habits().filter(habit => !habit.archived);
+const archivedHabits = () => habits().filter(habit => habit.archived);
 const todayDate = () => parseISO(ui.data.today);
 const findHabit = name => habits().find(habit => habit.name === name);
 
+/** The habit's chosen colour, or one picked from its position in the list. */
 function colorOf(habit) {
-  return PALETTE[habits().indexOf(habit) % PALETTE.length];
+  const index = habit.color !== null && habit.color !== undefined ? habit.color : habits().indexOf(habit);
+  return PALETTE[((index % PALETTE.length) + PALETTE.length) % PALETTE.length];
 }
 
 function accentStyle(color) {
@@ -93,6 +116,16 @@ function accentStyle(color) {
 
 function truncate(text, max) {
   return text.length > max ? text.slice(0, max - 1) + '…' : text;
+}
+
+const displayName = habit => (habit.emoji ? `${habit.emoji} ${habit.name}` : habit.name);
+const scheduledOn = (habit, date) => habit.schedule.days.includes(DAY_CODES[weekdayIndex(date)]);
+const countOn = (habit, key) => (habit.checkInMap.get(key) || { count: 0 }).count;
+const noteOn = (habit, key) => (habit.checkInMap.get(key) || { note: null }).note;
+
+/** "1 day", "4 days", "2 weeks" */
+function unitWord(habit, n) {
+  return `${n} ${habit.streakUnit}${n === 1 ? '' : 's'}`;
 }
 
 // ------------------------------------------------------------------ server calls
@@ -111,15 +144,22 @@ async function request(method, path, params) {
   }
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || 'Something went wrong.');
-  for (const habit of body.habits) habit.done = new Set(habit.completedDates);
-  ui.data = body;
   return body;
+}
+
+/** Stores a full state response, adding quick lookups to each habit. */
+function setState(body) {
+  for (const habit of body.habits) {
+    habit.done = new Set(habit.completedDates);
+    habit.checkInMap = new Map(habit.checkIns.map(c => [c.date, c]));
+  }
+  ui.data = body;
 }
 
 /** POST a change, re-render, and show a toast. */
 async function act(path, params, successMessage) {
   try {
-    await request('POST', path, params);
+    setState(await request('POST', path, params));
     render();
     if (successMessage) toast(successMessage);
   } catch (e) {
@@ -129,7 +169,7 @@ async function act(path, params, successMessage) {
 
 async function refresh() {
   try {
-    await request('GET', '/api/state');
+    setState(await request('GET', '/api/state'));
     render();
   } catch (e) {
     toast(e.message, true);
@@ -149,10 +189,12 @@ function toast(message, isError = false) {
 }
 
 /**
- * Small promise-free modal. onConfirm(value) may throw: the message is shown inside
- * the modal and it stays open so the user can fix their input.
+ * A small dialog. Pass inputValue for a single text field (multiline for a textarea), or
+ * body for custom content. onConfirm(value) may throw: the message is shown inside the
+ * dialog and it stays open so the user can fix their input. extraActions are shown on
+ * the left, e.g. Archive / Delete.
  */
-function openModal({ title, message, inputValue, placeholder, confirmLabel, danger, onConfirm }) {
+function openModal({ title, message, body, inputValue, multiline, placeholder, confirmLabel, danger, onConfirm, extraActions = [] }) {
   const backdrop = document.getElementById('modal');
   const close = () => {
     backdrop.hidden = true;
@@ -161,9 +203,13 @@ function openModal({ title, message, inputValue, placeholder, confirmLabel, dang
   };
   const onKey = event => { if (event.key === 'Escape') close(); };
 
-  const input = inputValue !== undefined
-    ? h('input', { type: 'text', value: inputValue, placeholder, 'aria-label': title, maxlength: '60' })
-    : null;
+  let input = null;
+  if (inputValue !== undefined) {
+    input = multiline
+      ? h('textarea', { rows: '4', placeholder, 'aria-label': title, maxlength: '280' })
+      : h('input', { type: 'text', placeholder, 'aria-label': title, maxlength: '60' });
+    input.value = inputValue;
+  }
   const errorText = h('div', { class: 'error-text', role: 'alert' });
 
   const confirm = async () => {
@@ -174,14 +220,18 @@ function openModal({ title, message, inputValue, placeholder, confirmLabel, dang
       errorText.textContent = e.message;
     }
   };
-  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') confirm(); });
+  if (input && !multiline) input.addEventListener('keydown', e => { if (e.key === 'Enter') confirm(); });
 
-  const dialog = h('div', { class: 'card modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+  const dialog = h('div', { class: `card modal${body ? ' wide' : ''}`, role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
     h('h2', { text: title }),
     message ? h('p', { text: message }) : null,
+    body || null,
     input,
     errorText,
     h('div', { class: 'modal-actions' },
+      h('div', { class: 'left-actions' }, extraActions.map(action =>
+        h('button', { class: action.danger ? 'btn danger small' : 'btn secondary small', type: 'button', text: action.label,
+          onclick: () => action.onClick(close) }))),
       h('button', { class: 'btn secondary', type: 'button', text: 'Cancel', onclick: close }),
       h('button', { class: danger ? 'btn danger' : 'btn', type: 'button', text: confirmLabel, onclick: confirm })));
 
@@ -189,8 +239,9 @@ function openModal({ title, message, inputValue, placeholder, confirmLabel, dang
   backdrop.onclick = event => { if (event.target === backdrop) close(); };
   backdrop.hidden = false;
   document.addEventListener('keydown', onKey);
-  (input || dialog.querySelector('.btn:not(.secondary)')).focus();
-  if (input) input.select();
+  const focusTarget = input || dialog.querySelector('input, button.btn:not(.secondary)');
+  focusTarget.focus();
+  if (input && !multiline) input.select();
 }
 
 // ------------------------------------------------------------------ rendering entry point
@@ -203,8 +254,14 @@ function render() {
     tab.setAttribute('aria-selected', String(tab.dataset.tab === ui.tab));
   }
   const root = document.getElementById('app');
-  const views = { today: renderToday, calendar: renderCalendar, highlights: renderHighlights };
-  root.replaceChildren(...views[ui.tab]());
+  const views = { today: renderToday, calendar: renderCalendar, highlights: renderHighlights, settings: renderSettings };
+  root.replaceChildren(...views[ui.tab]().filter(Boolean));
+
+  if (ui.focusHandle) {
+    const handle = [...document.querySelectorAll('.drag-handle')].find(el => el.dataset.name === ui.focusHandle);
+    if (handle) handle.focus();
+    ui.focusHandle = null;
+  }
 }
 
 function emptyState() {
@@ -218,12 +275,14 @@ function emptyState() {
 // ------------------------------------------------------------------ Today tab
 
 function renderToday() {
+  const list = activeHabits();
   return [
     summaryCards(),
     addHabitForm(),
     h('h2', { class: 'section-title' }, 'Your habits ',
-      h('span', { class: 'hint', text: '· tap the circle to check in' })),
-    habits().length ? h('div', { class: 'habit-list' }, habits().map(habitCard)) : emptyState(),
+      h('span', { class: 'hint', text: '· tap the circle to check in, drag ⠿ to reorder' })),
+    list.length ? h('div', { class: 'habit-list' }, list.map(habitCard)) : emptyState(),
+    archivedSection(),
   ];
 }
 
@@ -238,10 +297,11 @@ function summaryCards() {
   const summary = ui.data.summary;
   const { doneToday, total } = summary;
   let mood = 'A fresh start awaits';
-  if (total > 0 && doneToday === total) mood = 'All done, you are glowing ✨';
+  if (total === 0 && activeHabits().length) mood = 'Nothing due today. Enjoy the rest 💤';
+  else if (total > 0 && doneToday === total) mood = 'All done, you are glowing ✨';
   else if (doneToday > 0) mood = 'Keep going, you have got this 💪';
 
-  const best = habits().reduce((top, habit) => (!top || habit.currentStreak > top.currentStreak ? habit : top), null);
+  const best = activeHabits().reduce((top, habit) => (!top || habit.currentStreak > top.currentStreak ? habit : top), null);
   const attention = summary.needingAttention;
 
   return h('div', {},
@@ -257,7 +317,7 @@ function summaryCards() {
         h('div', { class: 'stat-icon', style: 'background:var(--lilac)', 'aria-hidden': 'true' }, '🔥'),
         h('div', {},
           h('div', { class: 'label', text: 'Hottest streak' }),
-          h('div', { class: 'value', text: best ? `${best.currentStreak} day${best.currentStreak === 1 ? '' : 's'}` : '–' }),
+          h('div', { class: 'value', text: best ? unitWord(best, best.currentStreak) : '–' }),
           h('div', { class: 'sub', text: best && best.currentStreak > 0 ? best.name : 'Check in to start one' }))),
       h('div', { class: 'card stat-card' },
         h('div', { class: 'stat-icon', style: `background:${attention.length ? 'var(--lilac)' : 'var(--aqua)'}`, 'aria-hidden': 'true' },
@@ -266,7 +326,7 @@ function summaryCards() {
           h('div', { class: 'label', text: 'Needs some love' }),
           attention.length
             ? h('div', { class: 'chip-list' }, attention.map(name => h('span', { class: 'chip', text: name })))
-            : h('div', { class: 'sub', text: 'Everything was done in the last 3 days' })))));
+            : h('div', { class: 'sub', text: 'Nothing has been missed lately' })))));
 }
 
 function progressRing(done, total) {
@@ -285,17 +345,9 @@ function progressRing(done, total) {
 
 function addHabitForm() {
   const input = h('input', { type: 'text', placeholder: 'Add a new habit, e.g. "Stretch for 10 min"', 'aria-label': 'New habit name', maxlength: '60' });
-  const submit = async event => {
+  const submit = event => {
     event.preventDefault();
-    const name = input.value.trim();
-    if (!name) { input.focus(); return; }
-    try {
-      await request('POST', '/api/habits/add', { name });
-      render();
-      toast(`"${name}" added 🫧`);
-    } catch (e) {
-      toast(e.message, true);
-    }
+    openHabitDialog(null, input.value.trim());
   };
   return h('form', { class: 'add-form', onsubmit: submit },
     input,
@@ -304,28 +356,121 @@ function addHabitForm() {
 
 function habitCard(habit) {
   const color = colorOf(habit);
-  const toggleToday = () => habit.doneToday
-    ? act('/api/undo', { name: habit.name }, `Undid today for "${habit.name}"`)
-    : act('/api/checkin', { name: habit.name }, celebrate(habit));
+  const resting = !habit.dueToday && !habit.doneToday;
+  let card;
 
-  return h('article', { class: `card habit${habit.doneToday ? ' done' : ''}`, style: accentStyle(color) },
-    h('button', {
+  const handle = h('span', {
+    class: 'drag-handle', role: 'button', tabindex: '0', draggable: 'true', 'data-name': habit.name,
+    title: 'Drag to reorder (or use the arrow keys)', 'aria-label': `Reorder "${habit.name}". Use the up and down arrow keys.`,
+    ondragstart: event => {
+      ui.dragName = habit.name;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', habit.name);
+      card.classList.add('dragging');
+    },
+    ondragend: () => {
+      ui.dragName = null;
+      document.querySelectorAll('.drop-target, .dragging').forEach(el => el.classList.remove('drop-target', 'dragging'));
+    },
+    onkeydown: event => {
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        moveBy(habit, event.key === 'ArrowUp' ? -1 : 1);
+      }
+    },
+  }, '⠿');
+
+  card = h('article', {
+    class: `card habit${habit.doneToday ? ' done' : ''}${resting ? ' resting' : ''}`,
+    style: accentStyle(color),
+    ondragover: event => {
+      if (ui.dragName && ui.dragName !== habit.name) {
+        event.preventDefault();
+        card.classList.add('drop-target');
+      }
+    },
+    ondragleave: () => card.classList.remove('drop-target'),
+    ondrop: event => {
+      event.preventDefault();
+      const name = ui.dragName;
+      ui.dragName = null;
+      if (name && name !== habit.name) moveTo(name, habit);
+    },
+  },
+  handle,
+  checkControl(habit),
+  h('div', { class: 'habit-info' },
+    h('div', { class: 'habit-name' },
+      habit.emoji ? h('span', { class: 'habit-emoji', 'aria-hidden': 'true', text: habit.emoji }) : null,
+      habit.name),
+    habitMeta(habit, resting)),
+  weekDots(habit),
+  h('div', { class: 'icon-buttons' },
+    h('button', { class: 'icon-button', type: 'button', title: 'Note for today', 'aria-label': `Note for "${habit.name}" today`,
+      onclick: () => editNote(habit, ui.data.today) }, '📝'),
+    h('button', { class: 'icon-button', type: 'button', title: 'Edit', 'aria-label': `Edit "${habit.name}"`,
+      onclick: () => openHabitDialog(habit) }, '✏️')));
+  return card;
+}
+
+/** A tick button for simple habits; a progress ring with + / − for habits with a target. */
+function checkControl(habit) {
+  if (habit.target <= 1) {
+    const toggleToday = () => (habit.doneToday
+      ? act('/api/undo', { name: habit.name }, `Undid today for "${habit.name}"`)
+      : act('/api/checkin', { name: habit.name }, celebrate(habit)));
+    return h('button', {
       class: 'check', type: 'button', text: '✓',
       'aria-pressed': String(habit.doneToday),
       'aria-label': `${habit.doneToday ? 'Undo' : 'Mark'} "${habit.name}" ${habit.doneToday ? 'for today' : 'done today'}`,
       onclick: toggleToday,
-    }),
-    h('div', {},
-      h('div', { class: 'habit-name', text: habit.name }),
-      h('div', { class: 'habit-meta' },
-        h('span', { text: `🔥 ${habit.currentStreak} day streak` }),
-        h('span', { text: `🏆 best ${habit.longestStreak}` }),
-        h('span', { text: `📈 ${habit.completion}%` }),
-        habit.needsAttention ? h('span', { class: 'attention', text: 'missed 3 days' }) : null)),
-    weekDots(habit),
-    h('div', { class: 'icon-buttons' },
-      h('button', { class: 'icon-button', type: 'button', title: 'Rename', 'aria-label': `Rename "${habit.name}"`, onclick: () => renameHabit(habit) }, '✏️'),
-      h('button', { class: 'icon-button', type: 'button', title: 'Delete', 'aria-label': `Delete "${habit.name}"`, onclick: () => deleteHabit(habit) }, '🗑️')));
+    });
+  }
+
+  const count = habit.todayCount;
+  const r = 20, circumference = 2 * Math.PI * r;
+  const ring = s('svg', { width: 48, height: 48, viewBox: '0 0 48 48', 'aria-hidden': 'true' },
+    s('circle', { cx: 24, cy: 24, r, fill: 'none', stroke: 'var(--accent-tint)', 'stroke-width': 5 }),
+    count > 0 ? s('circle', {
+      cx: 24, cy: 24, r, fill: 'none', stroke: 'var(--accent-deep)', 'stroke-width': 5, 'stroke-linecap': 'round',
+      'stroke-dasharray': `${circumference * Math.min(1, count / habit.target)} ${circumference}`, transform: 'rotate(-90 24 24)',
+    }) : null);
+  const plusOne = () => {
+    if (habit.doneToday) { toast(`"${habit.name}" target already reached today ✨`); return; }
+    const next = count + 1;
+    act('/api/progress', { name: habit.name, delta: 1 },
+      next >= habit.target ? celebrate(habit) : `${habit.emoji || '✓'} ${next} of ${habit.target}`);
+  };
+  return h('div', { class: 'counter' },
+    h('button', {
+      class: `check ring${habit.doneToday ? ' full' : ''}`, type: 'button',
+      'aria-label': `Add one to "${habit.name}": ${count} of ${habit.target} done today`, onclick: plusOne,
+    }, ring, h('span', { class: 'ring-count', text: habit.doneToday ? '✓' : `${count}/${habit.target}` })),
+    count > 0 ? h('button', {
+      class: 'minus', type: 'button', text: '−', title: 'Remove one',
+      'aria-label': `Remove one from "${habit.name}"`,
+      onclick: () => act('/api/progress', { name: habit.name, delta: -1 }),
+    }) : null);
+}
+
+function habitMeta(habit, resting) {
+  const chips = [
+    h('span', { text: `🔥 ${habit.currentStreak}-${habit.streakUnit} streak` }),
+    h('span', { text: `🏆 best ${habit.longestStreak}` }),
+    h('span', { text: `📈 ${habit.completion}%` }),
+  ];
+  if (habit.schedule.type === 'WEEKLY' && habit.weekProgress) {
+    chips.push(h('span', { text: `🗓️ ${habit.weekProgress.done}/${habit.weekProgress.goal} this week` }));
+  } else if (habit.schedule.type === 'WEEKDAYS') {
+    chips.push(h('span', { text: `📅 ${habit.schedule.label}` }));
+  }
+  if (habit.reminder) chips.push(h('span', { text: `⏰ ${formatTime(habit.reminder)}` }));
+  if (resting) {
+    chips.push(h('span', { class: 'rest-chip', text: habit.schedule.type === 'WEEKLY' ? '✨ weekly goal met' : '💤 rest day' }));
+  }
+  if (habit.needsAttention) chips.push(h('span', { class: 'attention', text: 'needs some love' }));
+  if (habit.todayNote) chips.push(h('span', { class: 'note-chip', title: habit.todayNote, text: `📝 ${truncate(habit.todayNote, 36)}` }));
+  return h('div', { class: 'habit-meta' }, chips);
 }
 
 /** Picks a cheerful message for a check in, celebrating milestones and finishing the day. */
@@ -333,7 +478,7 @@ function celebrate(habit) {
   const next = habit.currentStreak + 1;
   const { doneToday, total } = ui.data.summary;
   if (doneToday + 1 === total && total > 1) return 'Every habit done today! 🎉';
-  if ([7, 14, 21, 30, 50, 100].includes(next)) return `${next} day streak! You are on fire 🔥`;
+  if (habit.streakUnit === 'day' && [7, 14, 21, 30, 50, 100].includes(next)) return `${next} day streak! You are on fire 🔥`;
   return `Nice! "${habit.name}" done 🌟`;
 }
 
@@ -341,22 +486,183 @@ function weekDots(habit) {
   return h('div', { class: 'week', 'aria-label': 'Last 7 days' },
     habit.lastSevenDays.map(day => {
       const date = parseISO(day.date);
-      const status = day.beforeCreation ? 'not tracked yet' : (day.done ? 'done' : 'missed');
+      let status = day.done ? 'done' : 'missed';
+      if (day.beforeCreation) status = 'not tracked yet';
+      else if (!day.done && !day.scheduled) status = 'rest day';
+      const classes = ['dot'];
+      if (day.done) classes.push('done');
+      if (day.beforeCreation) classes.push('untracked');
+      else if (!day.done && !day.scheduled) classes.push('rest');
       return h('div', { class: 'week-day', title: `${formatDate(date, { weekday: 'long', month: 'short', day: 'numeric' })}: ${status}` },
-        h('div', { class: `dot${day.done ? ' done' : ''}${day.beforeCreation ? ' untracked' : ''}` }),
+        h('div', { class: classes.join(' ') }),
         WEEKDAY_SHORT[weekdayIndex(date)].charAt(0));
     }));
 }
 
-function renameHabit(habit) {
+// ------------------------------------------------------------------ reordering
+
+function moveTo(name, target) {
+  act('/api/habits/move', { name, index: habits().indexOf(target) });
+}
+
+function moveBy(habit, delta) {
+  const list = activeHabits();
+  const target = list[list.indexOf(habit) + delta];
+  if (!target) return;
+  ui.focusHandle = habit.name;
+  moveTo(habit.name, target);
+}
+
+// ------------------------------------------------------------------ archived habits
+
+function archivedSection() {
+  const list = archivedHabits();
+  if (!list.length) return null;
+  const details = h('details', { class: 'card archived', open: ui.archivedOpen },
+    h('summary', { text: `Archived habits (${list.length})` }),
+    h('p', { class: 'hint', text: 'Archived habits keep their history but stay out of your day, stats and reminders.' }),
+    h('div', { class: 'archived-list' }, list.map(habit => h('div', { class: 'archived-row', style: accentStyle(colorOf(habit)) },
+      h('span', { class: 'swatch', 'aria-hidden': 'true' }),
+      h('span', { class: 'archived-name', text: displayName(habit) }),
+      h('span', { class: 'hint', text: `best streak ${unitWord(habit, habit.longestStreak)} · ${habit.completedDates.length} check-ins` }),
+      h('div', { class: 'row-actions' },
+        h('button', { class: 'btn secondary small', type: 'button', text: 'Restore',
+          onclick: () => act('/api/habits/archive', { name: habit.name, archived: 'false' }, `"${habit.name}" is back 🫧`) }),
+        h('button', { class: 'btn danger small', type: 'button', text: 'Delete', onclick: () => deleteHabit(habit) }))))));
+  details.addEventListener('toggle', () => { ui.archivedOpen = details.open; });
+  return details;
+}
+
+// ------------------------------------------------------------------ dialogs
+
+/** Add (habit = null) or edit a habit: name, emoji, colour, schedule, daily target, reminder. */
+function openHabitDialog(habit, presetName = '') {
+  const isNew = !habit;
+  const form = {
+    emoji: habit ? habit.emoji : null,
+    color: habit ? habit.color : null,
+    schedule: habit ? habit.schedule.type : 'DAILY',
+    days: new Set(habit && habit.schedule.type === 'WEEKDAYS' ? habit.schedule.days : ['MON', 'WED', 'FRI']),
+    times: habit && habit.schedule.type === 'WEEKLY' ? habit.schedule.timesPerWeek : 3,
+  };
+
+  const nameInput = h('input', { type: 'text', maxlength: '60', placeholder: 'e.g. Drink water', 'aria-label': 'Habit name' });
+  nameInput.value = habit ? habit.name : presetName;
+
+  // Emoji: a pick-one grid, plus "none". A custom emoji from before is kept as an option.
+  const emojiChoices = form.emoji && !EMOJI_CHOICES.includes(form.emoji) ? [form.emoji, ...EMOJI_CHOICES] : EMOJI_CHOICES;
+  const emojiButtons = [null, ...emojiChoices].map(emoji => h('button', {
+    type: 'button', class: 'emoji-choice', 'aria-pressed': String(form.emoji === emoji),
+    'aria-label': emoji ? `Emoji ${emoji}` : 'No emoji',
+    onclick: event => {
+      form.emoji = emoji;
+      emojiButtons.forEach(b => b.setAttribute('aria-pressed', String(b === event.currentTarget)));
+    },
+  }, emoji || '∅'));
+
+  const colorButtons = [null, 0, 1, 2, 3, 4, 5].map(index => h('button', {
+    type: 'button', class: `swatch-choice${index === null ? ' auto' : ''}`,
+    style: index === null ? null : `background:${PALETTE[index].deep}`,
+    'aria-pressed': String(form.color === index), 'aria-label': index === null ? 'Automatic colour' : PALETTE_NAMES[index],
+    title: index === null ? 'Automatic' : PALETTE_NAMES[index],
+    onclick: event => {
+      form.color = index;
+      colorButtons.forEach(b => b.setAttribute('aria-pressed', String(b === event.currentTarget)));
+    },
+  }, index === null ? 'auto' : ''));
+
+  const dayButtons = DAY_CODES.map((code, i) => h('button', {
+    type: 'button', class: 'day-choice', 'aria-pressed': String(form.days.has(code)), text: WEEKDAY_SHORT[i],
+    onclick: event => {
+      if (form.days.has(code)) form.days.delete(code); else form.days.add(code);
+      event.currentTarget.setAttribute('aria-pressed', String(form.days.has(code)));
+    },
+  }));
+  const timesInput = h('input', { type: 'number', min: '1', max: '6', 'aria-label': 'Times per week', class: 'small-number' });
+  timesInput.value = String(form.times);
+  const daysPanel = h('div', { class: 'day-choices' }, dayButtons);
+  const timesPanel = h('div', { class: 'inline-field' }, timesInput, h('span', { text: 'times a week, on any days' }));
+
+  const scheduleOptions = [['DAILY', 'Every day'], ['WEEKDAYS', 'Some days'], ['WEEKLY', 'X times a week']];
+  const scheduleButtons = scheduleOptions.map(([value, label]) => h('button', {
+    type: 'button', class: 'seg', 'aria-pressed': String(form.schedule === value), text: label,
+    onclick: () => { form.schedule = value; syncSchedule(); },
+  }));
+  const syncSchedule = () => {
+    scheduleButtons.forEach((b, i) => b.setAttribute('aria-pressed', String(scheduleOptions[i][0] === form.schedule)));
+    daysPanel.hidden = form.schedule !== 'WEEKDAYS';
+    timesPanel.hidden = form.schedule !== 'WEEKLY';
+  };
+  syncSchedule();
+
+  const targetInput = h('input', { type: 'number', min: '1', max: '99', 'aria-label': 'Daily target', class: 'small-number' });
+  targetInput.value = String(habit ? habit.target : 1);
+
+  const remindToggle = h('input', { type: 'checkbox', class: 'switch', 'aria-label': 'Remind me', checked: Boolean(habit && habit.reminder) });
+  const timeInput = h('input', { type: 'time', 'aria-label': 'Reminder time' });
+  timeInput.value = habit && habit.reminder ? habit.reminder : '08:00';
+  timeInput.disabled = !remindToggle.checked;
+  remindToggle.addEventListener('change', () => { timeInput.disabled = !remindToggle.checked; });
+
+  const body = h('div', { class: 'habit-form' },
+    field('Name', nameInput),
+    field('Emoji', h('div', { class: 'emoji-grid' }, emojiButtons)),
+    field('Colour', h('div', { class: 'swatches' }, colorButtons)),
+    field('How often', h('div', {}, h('div', { class: 'segmented' }, scheduleButtons), daysPanel, timesPanel)),
+    field('Daily target', h('div', { class: 'inline-field' }, targetInput,
+      h('span', { class: 'hint', text: 'times a day, e.g. 8 glasses. 1 = a simple check-in.' }))),
+    field('Reminder', h('label', { class: 'inline-field' }, remindToggle, h('span', { text: 'Remind me at' }), timeInput)));
+
+  const extraActions = isNew ? [] : [
+    { label: 'Archive', onClick: close => { close(); act('/api/habits/archive', { name: habit.name, archived: 'true' }, `"${habit.name}" archived`); } },
+    { label: 'Delete', danger: true, onClick: close => { close(); deleteHabit(habit); } },
+  ];
+
   openModal({
-    title: 'Rename habit',
-    inputValue: habit.name,
-    confirmLabel: 'Save',
-    onConfirm: async newName => {
-      await request('POST', '/api/habits/rename', { name: habit.name, newName });
+    title: isNew ? 'New habit' : 'Edit habit',
+    body,
+    confirmLabel: isNew ? 'Add habit' : 'Save',
+    extraActions,
+    onConfirm: async () => {
+      const params = {
+        emoji: form.emoji || '',
+        color: form.color === null || form.color === undefined ? '' : String(form.color),
+        schedule: form.schedule,
+        days: [...form.days].join(','),
+        timesPerWeek: timesInput.value,
+        target: targetInput.value,
+        reminder: remindToggle.checked ? timeInput.value : '',
+      };
+      if (isNew) {
+        setState(await request('POST', '/api/habits/add', { ...params, name: nameInput.value }));
+        render();
+        toast(`"${nameInput.value.trim()}" added 🫧`);
+      } else {
+        setState(await request('POST', '/api/habits/update', { ...params, name: habit.name, newName: nameInput.value }));
+        render();
+        toast('Saved ✓');
+      }
+    },
+  });
+  nameInput.focus();
+}
+
+function field(label, control) {
+  return h('div', { class: 'field' }, h('div', { class: 'field-label', text: label }), control);
+}
+
+function editNote(habit, dateKey) {
+  openModal({
+    title: `Note · ${formatDate(parseISO(dateKey), { weekday: 'short', month: 'short', day: 'numeric' })}`,
+    message: displayName(habit),
+    inputValue: noteOn(habit, dateKey) || '',
+    multiline: true,
+    placeholder: 'How did it go? e.g. "5 km, felt great"',
+    confirmLabel: 'Save note',
+    onConfirm: async value => {
+      setState(await request('POST', '/api/note', { name: habit.name, date: dateKey, note: value }));
       render();
-      toast('Renamed ✏️');
+      toast(value.trim() ? 'Note saved 📝' : 'Note removed');
     },
   });
 }
@@ -364,11 +670,11 @@ function renameHabit(habit) {
 function deleteHabit(habit) {
   openModal({
     title: `Delete "${habit.name}"?`,
-    message: 'This removes the habit and all of its history. It cannot be undone.',
+    message: 'This removes the habit and all of its history. It cannot be undone. (Archive keeps the history instead.)',
     confirmLabel: 'Delete',
     danger: true,
     onConfirm: async () => {
-      await request('POST', '/api/habits/delete', { name: habit.name });
+      setState(await request('POST', '/api/habits/delete', { name: habit.name }));
       render();
       toast('Habit deleted');
     },
@@ -378,12 +684,12 @@ function deleteHabit(habit) {
 function confirmDemo() {
   openModal({
     title: 'Load demo data?',
-    message: 'This replaces ALL your current habits with 3 sample habits that have 30 days of history.',
+    message: 'This replaces ALL your current habits with 4 sample habits that have 30 days of history.',
     confirmLabel: 'Replace with demo data',
     danger: true,
     onConfirm: async () => {
-      await request('POST', '/api/demo', {});
-      ui.calendarHabit = ui.highlightHabit = null;
+      setState(await request('POST', '/api/demo', {}));
+      ui.calendarHabit = ui.highlightHabit = ui.calendarDay = null;
       render();
       toast('Demo data loaded ✨');
     },
@@ -392,30 +698,43 @@ function confirmDemo() {
 
 // ------------------------------------------------------------------ Calendar tab
 
-function habitPills(selectedName, onSelect) {
+function habitPills(list, selectedName, onSelect) {
   return h('div', { class: 'pills', role: 'group', 'aria-label': 'Choose a habit' },
-    habits().map(habit => h('button', {
+    list.map(habit => h('button', {
       class: 'pill', type: 'button', style: accentStyle(colorOf(habit)),
       'aria-pressed': String(habit.name === selectedName),
       onclick: () => onSelect(habit.name),
-    }, h('span', { class: 'swatch', 'aria-hidden': 'true' }), habit.name)));
+    }, h('span', { class: 'swatch', 'aria-hidden': 'true' }), displayName(habit))));
 }
 
 function renderCalendar() {
-  if (!habits().length) return [h('h2', { class: 'section-title', text: 'Calendar' }), emptyState()];
+  const list = activeHabits();
+  if (!list.length) return [h('h2', { class: 'section-title', text: 'Calendar' }), emptyState()];
 
-  const habit = findHabit(ui.calendarHabit) || habits()[0];
+  const habit = list.find(x => x.name === ui.calendarHabit) || list[0];
   ui.calendarHabit = habit.name;
   const today = todayDate();
   if (!ui.calendarMonth) ui.calendarMonth = new Date(today.getFullYear(), today.getMonth(), 1);
   const month = ui.calendarMonth;
   const color = colorOf(habit);
   const created = parseISO(habit.createdDate);
+  const trackable = d => d <= today && d >= created;
+
+  if (ui.calendarDay) {
+    const selected = parseISO(ui.calendarDay);
+    if (selected.getMonth() !== month.getMonth() || selected.getFullYear() !== month.getFullYear() || !trackable(selected)) {
+      ui.calendarDay = null;
+    }
+  }
+  if (!ui.calendarDay && month.getMonth() === today.getMonth() && month.getFullYear() === today.getFullYear()) {
+    ui.calendarDay = ui.data.today;
+  }
 
   const isCurrentMonth = month.getFullYear() === today.getFullYear() && month.getMonth() === today.getMonth();
   const isCreationMonth = month.getFullYear() === created.getFullYear() && month.getMonth() === created.getMonth();
   const changeMonth = delta => {
     ui.calendarMonth = new Date(month.getFullYear(), month.getMonth() + delta, 1);
+    ui.calendarDay = null;
     render();
   };
 
@@ -426,274 +745,238 @@ function renderCalendar() {
   for (let d = new Date(month); d.getMonth() === month.getMonth(); d = addDays(d, 1)) {
     const key = toISO(d);
     const done = habit.done.has(key);
+    const count = countOn(habit, key);
+    const note = noteOn(habit, key);
     if (done) checkIns++;
-    const trackable = d <= today && d >= created;
+    const classes = ['day'];
+    if (done) classes.push('done');
+    else if (count > 0) classes.push('partial');
+    if (!scheduledOn(habit, d)) classes.push('rest');
+    if (note) classes.push('has-note');
+    if (key === ui.data.today) classes.push('today');
+    if (key === ui.calendarDay) classes.push('selected');
+    let label = formatDate(d, { weekday: 'long', month: 'long', day: 'numeric' });
+    if (done) label += ', done';
+    else if (count > 0) label += `, ${count} of ${habit.target}`;
+    if (note) label += ', has a note';
     cells.push(h('button', {
-      class: `day${done ? ' done' : ''}${key === ui.data.today ? ' today' : ''}`,
-      type: 'button',
-      disabled: !trackable,
-      'aria-pressed': String(done),
-      'aria-label': `${formatDate(d, { weekday: 'long', month: 'long', day: 'numeric' })}${done ? ', done' : ''}`,
-      onclick: () => act('/api/toggle', { name: habit.name, date: key }, done ? `Unmarked ${formatDate(d, { month: 'short', day: 'numeric' })}` : `Marked ${formatDate(d, { month: 'short', day: 'numeric' })} done ✓`),
+      class: classes.join(' '), type: 'button', disabled: !trackable(d),
+      'aria-pressed': String(key === ui.calendarDay), 'aria-label': label,
+      onclick: () => { ui.calendarDay = key; render(); },
     }, String(d.getDate())));
   }
 
   return [
-    h('h2', { class: 'section-title' }, 'Calendar ', h('span', { class: 'hint', text: '· tap a day to mark it done or undo it' })),
-    habitPills(habit.name, name => { ui.calendarHabit = name; render(); }),
-    h('div', { class: 'card', style: accentStyle(color) },
-      h('div', { class: 'calendar-head' },
-        h('button', { class: 'icon-button', type: 'button', 'aria-label': 'Previous month', disabled: isCreationMonth, onclick: () => changeMonth(-1) }, '‹'),
-        h('h3', { text: formatDate(month, { month: 'long', year: 'numeric' }) }),
-        h('button', { class: 'icon-button', type: 'button', 'aria-label': 'Next month', disabled: isCurrentMonth, onclick: () => changeMonth(1) }, '›')),
-      h('div', { class: 'calendar-grid' }, cells),
-      h('div', { class: 'calendar-foot',
-        text: `${checkIns} check-in${checkIns === 1 ? '' : 's'} this month · tracking since ${formatDate(created, { month: 'long', day: 'numeric', year: 'numeric' })}` })),
+    h('h2', { class: 'section-title' }, 'Calendar ', h('span', { class: 'hint', text: '· tap a day to change it or add a note' })),
+    habitPills(list, habit.name, name => { ui.calendarHabit = name; ui.calendarDay = null; render(); }),
+    h('div', { class: 'calendar-layout', style: accentStyle(color) },
+      h('div', { class: 'card' },
+        h('div', { class: 'calendar-head' },
+          h('button', { class: 'icon-button', type: 'button', 'aria-label': 'Previous month', disabled: isCreationMonth, onclick: () => changeMonth(-1) }, '‹'),
+          h('h3', { text: formatDate(month, { month: 'long', year: 'numeric' }) }),
+          h('button', { class: 'icon-button', type: 'button', 'aria-label': 'Next month', disabled: isCurrentMonth, onclick: () => changeMonth(1) }, '›')),
+        h('div', { class: 'calendar-grid' }, cells),
+        h('div', { class: 'calendar-foot',
+          text: `${checkIns} check-in${checkIns === 1 ? '' : 's'} this month · ${habit.schedule.label} · tracking since ${formatDate(created, { month: 'long', day: 'numeric', year: 'numeric' })}` })),
+      dayPanel(habit)),
   ];
 }
 
-// ------------------------------------------------------------------ Highlights tab (graphs)
+/** Details for the selected calendar day: mark done / adjust the count, and its note. */
+function dayPanel(habit) {
+  if (!ui.calendarDay) {
+    return h('div', { class: 'card day-panel empty-panel' }, h('p', { class: 'hint', text: 'Tap a day to see or change it.' }));
+  }
+  const key = ui.calendarDay;
+  const date = parseISO(key);
+  const done = habit.done.has(key);
+  const count = countOn(habit, key);
+  const rest = !scheduledOn(habit, date);
+  let status = done ? 'Done ✓' : (count > 0 ? `${count} of ${habit.target} so far` : 'Not done');
+  if (!done && count === 0 && rest) status = 'Rest day 💤';
+  const niceDate = formatDate(date, { month: 'short', day: 'numeric' });
 
-function renderHighlights() {
-  if (!habits().length) return [h('h2', { class: 'section-title', text: 'Highlights' }), emptyState()];
+  const controls = habit.target > 1
+    ? h('div', { class: 'stepper' },
+      h('button', { class: 'btn secondary', type: 'button', text: '−', 'aria-label': 'Remove one', disabled: count === 0,
+        onclick: () => act('/api/progress', { name: habit.name, date: key, delta: -1 }) }),
+      h('span', { class: 'stepper-value', text: `${count} / ${habit.target}` }),
+      h('button', { class: 'btn', type: 'button', text: '+', 'aria-label': 'Add one', disabled: done,
+        onclick: () => act('/api/progress', { name: habit.name, date: key, delta: 1 }) }))
+    : h('button', { class: done ? 'btn secondary' : 'btn', type: 'button', text: done ? 'Mark not done' : 'Mark done',
+      onclick: () => act('/api/toggle', { name: habit.name, date: key }, done ? `Unmarked ${niceDate}` : `Marked ${niceDate} done ✓`) });
 
-  const habit = findHabit(ui.highlightHabit) || habits()[0];
-  ui.highlightHabit = habit.name;
-  const today = todayDate();
+  const noteBox = h('textarea', { rows: '4', maxlength: '280', placeholder: 'Add a note for this day…', 'aria-label': 'Note' });
+  noteBox.value = noteOn(habit, key) || '';
+  const saveNote = () => act('/api/note', { name: habit.name, date: key, note: noteBox.value },
+    noteBox.value.trim() ? 'Note saved 📝' : 'Note removed');
+
+  return h('div', { class: 'card day-panel' },
+    h('h3', { text: formatDate(date, { weekday: 'long', month: 'long', day: 'numeric' }) }),
+    h('p', { class: 'day-status', text: status }),
+    controls,
+    h('div', { class: 'field-label', style: 'margin-top:18px', text: 'Note' }),
+    noteBox,
+    h('button', { class: 'btn secondary small', type: 'button', text: 'Save note', onclick: saveNote }));
+}
+
+// ------------------------------------------------------------------ Settings tab
+
+async function loadSettings() {
+  ui.settings = await request('GET', '/api/settings');
+}
+
+function renderSettings() {
+  if (!ui.settings) {
+    loadSettings().then(render).catch(e => toast(e.message, true));
+    return [h('p', { class: 'loading', text: 'Loading settings…' })];
+  }
+  const st = ui.settings;
+  const save = async (params, message = 'Saved ✓') => {
+    try {
+      ui.settings = await request('POST', '/api/settings', params);
+      toast(message);
+    } catch (e) {
+      toast(e.message, true);
+    }
+    render();
+  };
+  const off = !st.remindersEnabled;
+
+  const dayEndOptions = ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00'];
+  const dayEndSelect = h('select', { 'aria-label': 'Day ends at', onchange: e => save({ dayEndsAt: e.target.value }) },
+    dayEndOptions.map(t => h('option', { value: t, text: t === '00:00' ? 'Midnight (default)' : formatTime(t) })));
+  dayEndSelect.value = st.dayEndsAt;
 
   return [
-    h('h2', { class: 'section-title', text: 'Highlights ✨' }),
-    overviewFacts(today),
-    h('div', { class: 'grid grid-2', style: 'margin-top:16px' },
-      chartCard('Streaks', 'Current streak vs. personal best', streakChart(),
-        legend([['Thick bar = current streak', '#a9aed0'], ['Thin bar = best ever', '#dfe2f3']])),
-      chartCard('Completion', 'Share of days done since each habit started', completionDonuts())),
-    h('div', { style: 'margin-top:16px' },
-      chartCard('Daily check-ins', 'Habits completed each day over the last 30 days', trendChart(today))),
-    h('h2', { class: 'section-title' }, 'Habit deep dive ', h('span', { class: 'hint', text: '· pick a habit' })),
-    habitPills(habit.name, name => { ui.highlightHabit = name; render(); }),
-    h('div', { class: 'grid grid-2' },
-      chartCard('Weekday rhythm', 'How often it gets done on each day of the week', weekdayChart(habit), weekdayFacts(habit)),
-      chartCard('Activity', 'Recent weeks, one square per day', heatmap(habit, today),
-        legend([['Done', colorOf(habit).deep], ['Missed', colorOf(habit).tint], ['Not tracked', '#ffffff']]))),
+    h('h2', { class: 'section-title', text: 'Settings ⚙️' }),
+    h('div', { class: 'grid grid-2 settings' },
+      h('section', { class: 'card' },
+        h('h3', { text: '⏰ Reminders' }),
+        switchRow('All reminders', 'Turn every notification on or off.', st.remindersEnabled,
+          v => save({ remindersEnabled: v }, v ? 'Reminders on ⏰' : 'Reminders paused')),
+        h('p', { class: 'hint', text: 'Each habit can have its own reminder time: tap ✏️ on a habit to set it.' }),
+        switchRow('Evening nudge', 'If anything due today is still not done.', st.nudgeEnabled,
+          v => save({ nudgeEnabled: v }), timeField(st.nudgeTime, v => save({ nudgeTime: v }), off || !st.nudgeEnabled), off),
+        switchRow('Streak alert', 'When a streak would break tonight.', st.streakAlertEnabled,
+          v => save({ streakAlertEnabled: v }), timeField(st.streakAlertTime, v => save({ streakAlertTime: v }), off || !st.streakAlertEnabled), off),
+        h('button', { class: 'btn secondary small', type: 'button', text: 'Send a test notification', onclick: sendTestNotice })),
+      h('section', { class: 'card' },
+        h('h3', { text: '🔔 Where reminders appear' }),
+        h('p', { text: st.trayAvailable
+          ? 'Windows notifications come from the bubble icon in your system tray, even when this page is closed. Keep the app running (it can stay in the tray).'
+          : 'No system tray here, so reminders only appear while this page is open.' }),
+        browserNotificationRow()),
+      h('section', { class: 'card' },
+        h('h3', { text: '🌙 Your day' }),
+        h('div', { class: 'setting-row' },
+          h('div', {},
+            h('div', { class: 'setting-title', text: 'Day ends at' }),
+            h('div', { class: 'hint', text: 'For night owls: with 3:00 AM, a check-in at 1 AM still counts for yesterday.' })),
+          dayEndSelect)),
+      h('section', { class: 'card' },
+        h('h3', { text: '🚀 Startup' }),
+        st.startAtLoginSupported
+          ? switchRow('Start with Windows', 'Opens quietly in the tray when you log in, so reminders just work.', st.startAtLogin,
+            v => save({ startAtLogin: v }, v ? 'Will start with Windows 🚀' : 'Will not start with Windows'))
+          : h('p', { class: 'hint', text: 'Starting automatically is only available on Windows.' }))),
   ];
 }
 
-function chartCard(title, caption, chart, footer) {
-  return h('section', { class: 'card chart-card' },
-    h('h3', { text: title }),
-    h('p', { class: 'caption', text: caption }),
-    chart,
-    footer || null);
+function switchRow(title, hint, checked, onChange, extra = null, disabled = false) {
+  return h('div', { class: `setting-row${disabled ? ' disabled' : ''}` },
+    h('div', {},
+      h('div', { class: 'setting-title', text: title }),
+      h('div', { class: 'hint', text: hint })),
+    h('div', { class: 'setting-controls' },
+      extra,
+      h('input', { type: 'checkbox', class: 'switch', role: 'switch', checked, disabled, 'aria-label': title,
+        onchange: e => onChange(e.target.checked) })));
 }
 
-function legend(items) {
-  return h('div', { class: 'legend' },
-    items.map(([label, color]) => h('span', {},
-      h('i', { style: `background:${color};border:1px solid ${LINE_COLOR}` }), label)));
+function timeField(value, onChange, disabled) {
+  const input = h('input', { type: 'time', 'aria-label': 'Time', disabled, onchange: e => { if (e.target.value) onChange(e.target.value); } });
+  input.value = value;
+  return input;
 }
 
-function overviewFacts(today) {
-  const all = habits();
-  const totalCheckIns = all.reduce((sum, habit) => sum + habit.completedDates.length, 0);
-  const best = all.reduce((top, habit) => (habit.longestStreak > top.longestStreak ? habit : top), all[0]);
-
-  // A "perfect day" is one where every habit that existed that day was done.
-  let perfectDays = 0;
-  for (let i = 0; i < 30; i++) {
-    const key = toISO(addDays(today, -i));
-    const active = all.filter(habit => habit.createdDate <= key);
-    if (active.length && active.every(habit => habit.done.has(key))) perfectDays++;
+function browserNotificationRow() {
+  if (!('Notification' in window)) {
+    return h('p', { class: 'hint', text: 'This browser does not support notifications.' });
   }
-
-  const strongest = findHabit(ui.data.summary.strongest);
-  const facts = [
-    ['💙', 'Total check-ins', String(totalCheckIns), 'across all habits'],
-    ['🏆', 'Best streak ever', `${best.longestStreak} days`, best.name],
-    ['💎', 'Most consistent', strongest ? `${strongest.completion}%` : '–', strongest ? strongest.name : ''],
-    ['🌟', 'Perfect days', String(perfectDays), 'every habit done, last 30 days'],
-  ];
-  const tints = ['var(--lavender)', 'var(--periwinkle)', 'var(--sky)', 'var(--aqua)'];
-  return h('div', { class: 'grid grid-4' }, facts.map(([icon, label, value, sub], i) =>
-    h('div', { class: 'card stat-card' },
-      h('div', { class: 'stat-icon', style: `background:${tints[i]}`, 'aria-hidden': 'true' }, icon),
-      h('div', { style: 'min-width:0' },
-        h('div', { class: 'label', text: label }),
-        h('div', { class: 'value', text: value }),
-        h('div', { class: 'sub ellipsis', text: sub, title: sub })))));
+  const permission = Notification.permission;
+  const labels = {
+    granted: 'Browser notifications are allowed for this page.',
+    denied: 'Browser notifications are blocked. You can allow them in your browser\'s site settings.',
+    default: 'Allow browser notifications as a backup while this page is open in the background.',
+  };
+  return h('div', { class: 'setting-row' },
+    h('div', { class: 'hint', text: labels[permission] }),
+    permission === 'default'
+      ? h('button', { class: 'btn small', type: 'button', text: 'Allow', onclick: async () => { await Notification.requestPermission(); render(); } })
+      : null);
 }
 
-/** Horizontal bars: current streak (solid) above best-ever streak (soft) for each habit. */
-function streakChart() {
-  const list = habits();
-  const width = 400, labelWidth = 104, valueRoom = 52, rowHeight = 50, top = 4;
-  const height = top + list.length * rowHeight;
-  const max = Math.max(1, ...list.map(habit => habit.longestStreak));
-  const barLength = value => Math.max(value > 0 ? 8 : 0, (width - labelWidth - valueRoom) * value / max);
-
-  const rows = list.map((habit, i) => {
-    const y = top + i * rowHeight;
-    const color = colorOf(habit);
-    const trackWidth = width - labelWidth - valueRoom;
-    return s('g', {},
-      tooltip(`${habit.name}: current ${habit.currentStreak} days, best ${habit.longestStreak} days`),
-      s('text', { x: 0, y: y + 22, 'font-weight': 700 }, truncate(habit.name, 13)),
-      s('rect', { x: labelWidth, y: y + 6, width: trackWidth, height: 16, rx: 8, fill: color.tint }),
-      s('rect', { x: labelWidth, y: y + 6, width: barLength(habit.currentStreak), height: 16, rx: 8, fill: color.deep }),
-      s('text', { x: labelWidth + trackWidth + 8, y: y + 19, class: 'value-label' }, `${habit.currentStreak}d`),
-      s('rect', { x: labelWidth, y: y + 26, width: barLength(habit.longestStreak), height: 10, rx: 5, fill: color.soft }),
-      s('text', { x: labelWidth + trackWidth + 8, y: y + 36, 'font-size': 11 }, `best ${habit.longestStreak}`));
-  });
-  return s('svg', { class: 'chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Streaks per habit' }, rows);
-}
-
-/** One donut per habit showing its completion percentage. */
-function completionDonuts() {
-  const r = 40, size = 104, circumference = 2 * Math.PI * r;
-  return h('div', { class: 'donuts' }, habits().map(habit => {
-    const color = colorOf(habit);
-    const ring = s('svg', { width: size, height: size, viewBox: `0 0 ${size} ${size}`, role: 'img', 'aria-label': `${habit.name}: ${habit.completion}%` },
-      s('circle', { cx: size / 2, cy: size / 2, r, fill: 'none', stroke: color.tint, 'stroke-width': 12 }),
-      habit.completion > 0 ? s('circle', {
-        cx: size / 2, cy: size / 2, r, fill: 'none', stroke: color.deep, 'stroke-width': 12, 'stroke-linecap': 'round',
-        'stroke-dasharray': `${circumference * habit.completion / 100} ${circumference}`,
-        transform: `rotate(-90 ${size / 2} ${size / 2})`,
-      }) : null,
-      s('text', { x: size / 2, y: size / 2 + 1, 'text-anchor': 'middle', 'dominant-baseline': 'middle', 'font-size': 17, 'font-weight': 800, fill: 'var(--ink)' },
-        `${Math.round(habit.completion)}%`));
-    return h('div', { class: 'donut' }, ring, h('div', { class: 'name', text: habit.name }));
-  }));
-}
-
-/** Area chart: number of habits done on each of the last 30 days. */
-function trendChart(today) {
-  const days = 30, width = 760, height = 220, left = 30, right = 14, top = 14, bottom = 30;
-  const points = [];
-  for (let i = days - 1; i >= 0; i--) {
-    const date = addDays(today, -i);
-    const key = toISO(date);
-    const active = habits().filter(habit => habit.createdDate <= key);
-    points.push({ date, done: active.filter(habit => habit.done.has(key)).length, active: active.length });
+async function sendTestNotice() {
+  try {
+    setState(await request('POST', '/api/notifications/test', {}));
+    await pollNotices();
+  } catch (e) {
+    toast(e.message, true);
   }
+}
 
-  const maxY = Math.max(1, ...points.map(p => p.active));
-  const step = maxY <= 6 ? 1 : Math.ceil(maxY / 5);
-  const x = i => left + i * (width - left - right) / (days - 1);
-  const y = v => top + (height - top - bottom) * (1 - v / maxY);
+// ------------------------------------------------------------------ reminders in the page
 
-  const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.done).toFixed(1)}`).join(' ');
-  const area = `${line} L${x(days - 1)},${y(0)} L${x(0)},${y(0)} Z`;
-
-  const grid = [];
-  for (let v = 0; v <= maxY; v += step) {
-    grid.push(s('line', { x1: left, x2: width - right, y1: y(v), y2: y(v), class: 'gridline' }));
-    grid.push(s('text', { x: left - 10, y: y(v) + 4, 'text-anchor': 'end' }, String(v)));
+async function pollNotices() {
+  try {
+    const body = await request('GET', `/api/notifications?after=${ui.lastNoticeId || 0}`);
+    const firstPoll = ui.lastNoticeId === null;
+    ui.lastNoticeId = body.latestId;
+    if (firstPoll || !body.notices.length) return; // don't replay reminders sent before the page opened
+    body.notices.forEach(showNotice);
+    refresh();
+  } catch (e) {
+    // The server may be restarting; the next poll will try again.
   }
-  const xLabels = points.map((p, i) => ((days - 1 - i) % 7 === 0
-    ? s('text', { x: x(i), y: height - 8, 'text-anchor': 'middle' }, i === days - 1 ? 'Today' : formatDate(p.date, { month: 'short', day: 'numeric' }))
-    : null));
-  const dots = points.map((p, i) => s('circle', {
-    cx: x(i), cy: y(p.done), r: p.active && p.done === p.active ? 5 : 3.5,
-    fill: p.active && p.done === p.active ? '#57a5db' : '#ffffff', stroke: '#9f82e3', 'stroke-width': 2,
-  }, tooltip(`${formatDate(p.date, { weekday: 'short', month: 'short', day: 'numeric' })}: ${p.done} of ${p.active} done`)));
-
-  return h('div', {},
-    s('svg', { class: 'chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Daily check-ins over the last 30 days' },
-      s('defs', {}, s('linearGradient', { id: 'trend-fill', x1: 0, y1: 0, x2: 0, y2: 1 },
-        s('stop', { offset: '0%', 'stop-color': '#dccff8', 'stop-opacity': 0.9 }),
-        s('stop', { offset: '100%', 'stop-color': '#c6e3f8', 'stop-opacity': 0.15 }))),
-      grid,
-      s('path', { d: area, fill: 'url(#trend-fill)' }),
-      s('path', { d: line, fill: 'none', stroke: '#9f82e3', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }),
-      dots,
-      xLabels),
-    legend([['Habits done', '#9f82e3'], ['Perfect day (blue dot)', '#57a5db']]));
 }
 
-/** Vertical bars Mon–Sun with the weekday completion rate. Best day is highlighted. */
-function weekdayChart(habit) {
-  const color = colorOf(habit);
-  const width = 420, height = 210, top = 24, bottom = 26, side = 6;
-  const slot = (width - side * 2) / 7;
-  const barWidth = slot * 0.58;
-  const plotHeight = height - top - bottom;
-
-  const bars = WEEKDAYS.map((day, i) => {
-    const rate = habit.weekdayRates[day];
-    const x = side + i * slot + (slot - barWidth) / 2;
-    const isBest = day === habit.bestWeekday;
-    const parts = [s('rect', { x, y: top, width: barWidth, height: plotHeight, rx: 10, fill: color.tint })];
-    if (rate === undefined) {
-      parts.push(s('text', { x: x + barWidth / 2, y: top + plotHeight / 2, 'text-anchor': 'middle' }, '–'));
-    } else {
-      const barHeight = plotHeight * rate;
-      if (barHeight > 0) {
-        parts.push(s('rect', {
-          x, y: top + plotHeight - barHeight, width: barWidth, height: barHeight,
-          rx: Math.min(10, barHeight / 2), fill: isBest ? color.deep : color.soft,
-        }));
-      }
-      parts.push(s('text', { x: x + barWidth / 2, y: top + plotHeight - barHeight - 6, 'text-anchor': 'middle', class: 'value-label', 'font-size': 11 },
-        `${Math.round(rate * 100)}%`));
-    }
-    parts.push(s('text', { x: x + barWidth / 2, y: height - 6, 'text-anchor': 'middle', 'font-weight': isBest ? 800 : 400 },
-      WEEKDAY_SHORT[i]));
-    const label = rate === undefined ? 'has not come round yet' : `${Math.round(rate * 100)}%`;
-    return s('g', {}, tooltip(`${WEEKDAY_SHORT[i]}: ${label}`), parts);
-  });
-  return s('svg', { class: 'chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `Weekday completion rates for ${habit.name}` }, bars);
-}
-
-function weekdayFacts(habit) {
-  const name = day => (day ? day.charAt(0) + day.slice(1).toLowerCase() : '–');
-  const rate = day => (day ? ` (${Math.round(habit.weekdayRates[day] * 100)}%)` : '');
-  return h('div', { class: 'highlight-facts' },
-    h('div', { class: 'fact' }, '✨ Best day: ', h('b', { text: name(habit.bestWeekday) + rate(habit.bestWeekday) })),
-    h('div', { class: 'fact' }, '🌧️ Toughest day: ', h('b', { text: name(habit.worstWeekday) + rate(habit.worstWeekday) })),
-    h('div', { class: 'fact' }, '🔥 Streak: ', h('b', { text: `${habit.currentStreak} now · ${habit.longestStreak} best` })));
-}
-
-/** GitHub-style grid: columns are weeks (Mon at the top), one square per day. */
-function heatmap(habit, today) {
-  // Show the habit's whole life, but at least 10 and at most 18 weeks.
-  const weeksAlive = Math.ceil((today - parseISO(habit.createdDate)) / (7 * 86400000)) + 1;
-  const weeks = Math.min(18, Math.max(10, weeksAlive));
-  const cell = 15, gap = 4, left = 32, top = 20;
-  const color = colorOf(habit);
-  const start = addDays(today, -weekdayIndex(today) - (weeks - 1) * 7);
-  const width = left + weeks * (cell + gap);
-  const height = top + 7 * (cell + gap);
-  const parts = [];
-
-  ['Mon', 'Wed', 'Fri'].forEach((label, i) =>
-    parts.push(s('text', { x: 0, y: top + i * 2 * (cell + gap) + cell - 3, 'font-size': 10 }, label)));
-
-  let previousMonth = -1;
-  for (let w = 0; w < weeks; w++) {
-    const columnStart = addDays(start, w * 7);
-    if (columnStart.getMonth() !== previousMonth) {
-      parts.push(s('text', { x: left + w * (cell + gap), y: 12, 'font-size': 10 }, formatDate(columnStart, { month: 'short' })));
-      previousMonth = columnStart.getMonth();
-    }
-    for (let r = 0; r < 7; r++) {
-      const date = addDays(columnStart, r);
-      if (date > today) continue;
-      const key = toISO(date);
-      const tracked = key >= habit.createdDate;
-      const done = habit.done.has(key);
-      const fill = done ? color.deep : (tracked ? color.tint : '#ffffff');
-      const status = done ? 'done' : (tracked ? 'missed' : 'not tracked');
-      parts.push(s('rect', {
-        x: left + w * (cell + gap), y: top + r * (cell + gap), width: cell, height: cell, rx: 4,
-        fill, stroke: done ? 'none' : LINE_COLOR,
-      }, tooltip(`${formatDate(date, { weekday: 'short', month: 'short', day: 'numeric' })}: ${status}`)));
-    }
+/** A banner with quick actions, plus a browser notification when the tab is hidden and there is no tray. */
+function showNotice(notice) {
+  const container = document.getElementById('notices');
+  const habit = notice.habit ? findHabit(notice.habit) : null;
+  let banner;
+  const dismiss = () => banner.remove();
+  const actions = [];
+  if (habit && notice.kind === 'HABIT') {
+    actions.push(h('button', { class: 'btn small', type: 'button', text: 'Mark done',
+      onclick: () => { dismiss(); act('/api/checkin', { name: habit.name }, celebrate(habit)); } }));
+    actions.push(h('button', { class: 'btn secondary small', type: 'button', text: 'Snooze 10 min',
+      onclick: async () => {
+        dismiss();
+        try {
+          setState(await request('POST', '/api/notifications/snooze', { name: habit.name, minutes: '10' }));
+          toast('Snoozed for 10 minutes 😴');
+        } catch (e) {
+          toast(e.message, true);
+        }
+      } }));
   }
-  // Cap the size so squares and labels stay small on wide cards.
-  return s('svg', {
-    class: 'chart', viewBox: `0 0 ${width} ${height}`, style: `max-width:${Math.round(width * 1.3)}px`,
-    role: 'img', 'aria-label': `Activity heatmap for ${habit.name}`,
-  }, parts);
+  banner = h('div', { class: 'card notice', role: 'alert' },
+    h('img', { src: 'bubble.svg', alt: '', class: 'notice-icon' }),
+    h('div', { class: 'notice-body' },
+      h('div', { class: 'notice-title', text: notice.title }),
+      h('div', { class: 'notice-message', text: notice.message }),
+      actions.length ? h('div', { class: 'notice-actions' }, actions) : null),
+    h('button', { class: 'icon-button', type: 'button', 'aria-label': 'Dismiss', onclick: dismiss }, '✕'));
+  container.prepend(banner);
+  while (container.children.length > 4) container.lastElementChild.remove();
+
+  const trayAvailable = ui.settings && ui.settings.trayAvailable;
+  if ('Notification' in window && Notification.permission === 'granted' && document.hidden && !trayAvailable) {
+    const browserNotice = new Notification(notice.title, { body: notice.message, icon: 'bubble.svg', tag: `habit-${notice.id}` });
+    browserNotice.onclick = () => window.focus();
+  }
 }
 
 // ------------------------------------------------------------------ wiring
@@ -711,4 +994,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
   if (ui.data && ui.data.warnings.length) {
     toast(`Skipped ${ui.data.warnings.length} broken line(s) in the habits file`, true);
   }
+  try { await loadSettings(); } catch (e) { /* the Settings tab will retry */ }
+  await pollNotices();
+  setInterval(pollNotices, NOTICE_POLL_MS);
 })();

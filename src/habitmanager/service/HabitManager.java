@@ -1,8 +1,10 @@
 package habitmanager.service;
 
 import habitmanager.model.Habit;
+import habitmanager.model.Schedule;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -14,7 +16,7 @@ import java.util.Optional;
 /**
  * Owns the collection of habits and enforces all the rules for changing them.
  * Habits are keyed by lowercase name so lookups and uniqueness are case insensitive,
- * and a LinkedHashMap keeps them in the order they were added.
+ * and a LinkedHashMap keeps them in the user's chosen order.
  *
  * Validation failures are reported with IllegalArgumentException carrying a
  * user-friendly message.
@@ -22,14 +24,46 @@ import java.util.Optional;
 public class HabitManager {
 
     public static final String FORBIDDEN_CHARACTER = "|";
+    /** Number of colours in the dashboard palette. */
+    public static final int PALETTE_SIZE = 6;
+    private static final int MAX_EMOJI_LENGTH = 16;
+    private static final int MAX_NAME_LENGTH = 60;
+
+    /** Everything about a habit the user can edit. Null reminder / colour / emoji mean "none". */
+    public record HabitDetails(String name, Schedule schedule, int target,
+                               LocalTime reminderTime, Integer colorIndex, String emoji) {
+
+        /** A plain daily habit with no extras. */
+        public static HabitDetails simple(String name) {
+            return new HabitDetails(name, Schedule.daily(), 1, null, null, null);
+        }
+    }
 
     private final Map<String, Habit> habits = new LinkedHashMap<>();
 
+    // ---------------------------------------------------------------- add, edit, delete
+
     public Habit addHabit(String rawName, LocalDate today) {
-        String name = validateName(rawName, null);
+        return addHabit(HabitDetails.simple(rawName), today);
+    }
+
+    public Habit addHabit(HabitDetails details, LocalDate today) {
+        String name = validateName(details.name(), null);
+        validateExtras(details);
         Habit habit = new Habit(name, today);
+        applyExtras(habit, details);
         habits.put(keyOf(name), habit);
         return habit;
+    }
+
+    /** Validates everything first, then applies it, so a bad field never leaves a half-edited habit. */
+    public void updateHabit(Habit habit, HabitDetails details) {
+        String newName = validateName(details.name(), habit);
+        validateExtras(details);
+        if (!newName.equals(habit.getName())) {
+            renameHabit(habit, newName);
+        }
+        applyExtras(habit, details);
     }
 
     public void renameHabit(Habit habit, String rawNewName) {
@@ -54,6 +88,22 @@ public class HabitManager {
         return habits.remove(keyOf(habit.getName())) != null;
     }
 
+    /** Archived habits keep their history but leave the daily list, stats and reminders. */
+    public void setArchived(Habit habit, boolean archived) {
+        habit.setArchived(archived);
+    }
+
+    /** Moves a habit to a new position (0 = first). Out-of-range positions are clamped. */
+    public void moveHabit(Habit habit, int newIndex) {
+        List<Habit> ordered = listHabits();
+        ordered.remove(habit);
+        ordered.add(Math.max(0, Math.min(newIndex, ordered.size())), habit);
+        habits.clear();
+        ordered.forEach(h -> habits.put(keyOf(h.getName()), h));
+    }
+
+    // ---------------------------------------------------------------- lookup
+
     public Optional<Habit> findHabit(String name) {
         if (name == null) {
             return Optional.empty();
@@ -72,6 +122,8 @@ public class HabitManager {
     public int size() {
         return habits.size();
     }
+
+    // ---------------------------------------------------------------- daily tracking
 
     /** Marks the habit done today. Returns false if it was already done. */
     public boolean checkIn(Habit habit, LocalDate today) {
@@ -106,6 +158,18 @@ public class HabitManager {
         return true;
     }
 
+    /** Adds or removes progress towards the daily target (e.g. one more glass). Returns the new count. */
+    public int addProgress(Habit habit, LocalDate date, int delta, LocalDate today) {
+        requireTrackableDate(habit, date, today);
+        return habit.addProgress(date, delta);
+    }
+
+    /** Sets or clears (blank) the note for a day. */
+    public void setNote(Habit habit, LocalDate date, String note, LocalDate today) {
+        requireTrackableDate(habit, date, today);
+        habit.setNote(date, note);
+    }
+
     /** A date can be tracked if it is between the habit's creation and today, inclusive. */
     private static void requireTrackableDate(Habit habit, LocalDate date, LocalDate today) {
         if (date.isAfter(today)) {
@@ -117,6 +181,8 @@ public class HabitManager {
         }
     }
 
+    // ---------------------------------------------------------------- bulk
+
     /** Replaces every habit, e.g. after loading from file or loading demo data. */
     public void replaceAll(Collection<Habit> newHabits) {
         habits.clear();
@@ -124,6 +190,8 @@ public class HabitManager {
             habits.putIfAbsent(keyOf(habit.getName()), habit);
         }
     }
+
+    // ---------------------------------------------------------------- validation
 
     /**
      * Checks a proposed name and returns it trimmed.
@@ -139,11 +207,38 @@ public class HabitManager {
         if (name.contains(FORBIDDEN_CHARACTER)) {
             throw new IllegalArgumentException("Habit name cannot contain the '|' character.");
         }
+        if (name.length() > MAX_NAME_LENGTH) {
+            throw new IllegalArgumentException("Habit name can be at most " + MAX_NAME_LENGTH + " characters.");
+        }
         Habit existing = habits.get(keyOf(name));
         if (existing != null && existing != habitBeingRenamed) {
             throw new IllegalArgumentException("A habit named \"" + existing.getName() + "\" already exists.");
         }
         return name;
+    }
+
+    private static void validateExtras(HabitDetails details) {
+        if (details.schedule() == null) {
+            throw new IllegalArgumentException("Choose how often the habit should happen.");
+        }
+        if (details.target() < 1 || details.target() > Habit.MAX_TARGET) {
+            throw new IllegalArgumentException("The daily target must be between 1 and " + Habit.MAX_TARGET + ".");
+        }
+        Integer color = details.colorIndex();
+        if (color != null && (color < 0 || color >= PALETTE_SIZE)) {
+            throw new IllegalArgumentException("Unknown colour.");
+        }
+        if (details.emoji() != null && details.emoji().strip().length() > MAX_EMOJI_LENGTH) {
+            throw new IllegalArgumentException("Pick a single emoji.");
+        }
+    }
+
+    private static void applyExtras(Habit habit, HabitDetails details) {
+        habit.setSchedule(details.schedule());
+        habit.setTarget(details.target());
+        habit.setReminderTime(details.reminderTime());
+        habit.setColorIndex(details.colorIndex());
+        habit.setEmoji(details.emoji());
     }
 
     private static String keyOf(String name) {
