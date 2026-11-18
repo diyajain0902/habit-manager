@@ -88,6 +88,26 @@ public class HabitManager {
      * the habit existed. Returns false if that date was already marked done.
      */
     public boolean backfill(Habit habit, LocalDate date, LocalDate today) {
+        requireTrackableDate(habit, date, today);
+        return habit.markDone(date);
+    }
+
+    /**
+     * Flips the done state of any trackable date (used by the calendar view).
+     * Returns true if the date is now done, false if it was just undone.
+     */
+    public boolean toggleDate(Habit habit, LocalDate date, LocalDate today) {
+        requireTrackableDate(habit, date, today);
+        if (habit.isDoneOn(date)) {
+            habit.undo(date);
+            return false;
+        }
+        habit.markDone(date);
+        return true;
+    }
+
+    /** A date can be tracked if it is between the habit's creation and today, inclusive. */
+    private static void requireTrackableDate(Habit habit, LocalDate date, LocalDate today) {
         if (date.isAfter(today)) {
             throw new IllegalArgumentException("You cannot backfill a future date.");
         }
@@ -95,7 +115,6 @@ public class HabitManager {
             throw new IllegalArgumentException("That date is before the habit was created ("
                     + habit.getCreatedDate() + ").");
         }
-        return habit.markDone(date);
     }
 
     /** Replaces every habit, e.g. after loading from file or loading demo data. */

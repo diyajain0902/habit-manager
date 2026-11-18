@@ -1,5 +1,6 @@
 import habitmanager.model.Habit;
 import habitmanager.service.HabitManager;
+import habitmanager.service.HabitService;
 import habitmanager.service.InsightEngine;
 import habitmanager.service.StreakCalculator;
 import habitmanager.storage.FileStorage;
@@ -8,7 +9,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.DayOfWeek;
+import java.time.ZoneOffset;
 import java.time.LocalDate;
 import java.util.EnumMap;
 import java.util.List;
@@ -39,6 +42,8 @@ public class StreakAndInsightTests {
         needsAttention();
         managerValidation();
         backfillValidation();
+        toggleDate();
+        habitServiceSavesEveryChange();
         fileStorageRoundTrip();
         fileStorageSkipsMalformedLines();
         fileStorageMissingFileStartsEmpty();
@@ -225,6 +230,41 @@ public class StreakAndInsightTests {
         checkThrows("date before creation is rejected", () -> manager.backfill(habit, today.minusDays(6), today));
         check("valid backfill", true, manager.backfill(habit, today.minusDays(5), today));
         check("backfilled date is recorded", true, habit.isDoneOn(today.minusDays(5)));
+    }
+
+    private static void toggleDate() {
+        LocalDate today = LocalDate.of(2024, 5, 10);
+        HabitManager manager = new HabitManager();
+        Habit habit = manager.addHabit("Toggle", today.minusDays(5));
+        LocalDate day = today.minusDays(2);
+        check("toggle marks an undone day done", true, manager.toggleDate(habit, day, today));
+        check("toggled day is recorded", true, habit.isDoneOn(day));
+        check("toggle again undoes it", false, manager.toggleDate(habit, day, today));
+        check("undone day is removed", false, habit.isDoneOn(day));
+        checkThrows("toggle rejects future dates", () -> manager.toggleDate(habit, today.plusDays(1), today));
+        checkThrows("toggle rejects dates before creation", () -> manager.toggleDate(habit, today.minusDays(6), today));
+    }
+
+    private static void habitServiceSavesEveryChange() throws IOException {
+        Path file = Files.createTempFile("habits-service", ".txt");
+        try {
+            LocalDate today = LocalDate.of(2024, 5, 10);
+            Clock fixed = Clock.fixed(today.atStartOfDay(ZoneOffset.UTC).toInstant(), ZoneOffset.UTC);
+            HabitService service = new HabitService(new HabitManager(), new FileStorage(file), fixed);
+            service.load();
+            service.addHabit("Meditate");
+            service.checkIn("meditate");
+            check("service: check in is saved straight away", true,
+                    Files.readString(file).contains("Meditate|2024-05-10|2024-05-10"));
+            check("service: second check in is not duplicated", false, service.checkIn("Meditate"));
+            service.renameHabit("Meditate", "Breathe");
+            check("service: rename is saved", true, Files.readString(file).startsWith("Breathe|"));
+            checkThrows("service: unknown habit is rejected", () -> service.checkIn("Nope"));
+            service.deleteHabit("breathe");
+            check("service: delete is saved", true, Files.readString(file).isBlank());
+        } finally {
+            Files.deleteIfExists(file);
+        }
     }
 
     // ---------------------------------------------------------------- storage

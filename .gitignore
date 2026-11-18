@@ -12,3 +12,6 @@ habits.txt.tmp
 *.iml
 .DS_Store
 Thumbs.db
+
+# Local Claude Code launch settings (machine-specific paths)
+.claude/

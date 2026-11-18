@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Habit Manager</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌱</text></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">🌱</span>
+      <div>
+        <h1>Habit Manager</h1>
+        <p class="brand-sub" id="today-label"></p>
+      </div>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button class="tab" role="tab" data-tab="today" aria-selected="true">Today</button>
+      <button class="tab" role="tab" data-tab="calendar" aria-selected="false">Calendar</button>
+      <button class="tab" role="tab" data-tab="highlights" aria-selected="false">Highlights</button>
+    </nav>
+  </header>
+
+  <main id="app" aria-live="polite">
+    <p class="loading">Watering the plants…</p>
+  </main>
+
+  <footer class="footer">
+    <button class="link-button" id="demo-button" type="button">Load demo data</button>
+    <span aria-hidden="true">·</span>
+    <span>Saved automatically to your habits file</span>
+  </footer>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <div class="modal-backdrop" id="modal" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
