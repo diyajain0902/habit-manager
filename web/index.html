@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Habit Manager</title>
   <link rel="icon" type="image/svg+xml" href="bubble.svg">
+  <script>
+    // Apply the saved theme before the page paints, so there is no flash of the wrong colours.
+    try {
+      const theme = localStorage.getItem('habit-theme');
+      if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+    } catch (e) { /* storage unavailable: follow the system setting */ }
+  </script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -16,12 +23,15 @@
         <p class="brand-sub" id="today-label"></p>
       </div>
     </div>
-    <nav class="tabs" role="tablist" aria-label="Sections">
-      <button class="tab" role="tab" data-tab="today" aria-selected="true">Today</button>
-      <button class="tab" role="tab" data-tab="calendar" aria-selected="false">Calendar</button>
-      <button class="tab" role="tab" data-tab="highlights" aria-selected="false">Highlights</button>
-      <button class="tab" role="tab" data-tab="settings" aria-selected="false">Settings</button>
-    </nav>
+    <div class="top-actions">
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button class="tab" role="tab" data-tab="today" aria-selected="true">Today</button>
+        <button class="tab" role="tab" data-tab="calendar" aria-selected="false">Calendar</button>
+        <button class="tab" role="tab" data-tab="highlights" aria-selected="false">Highlights</button>
+        <button class="tab" role="tab" data-tab="settings" aria-selected="false">Settings</button>
+      </nav>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch theme">🌙</button>
+    </div>
   </header>
 
   <main id="app" aria-live="polite">
@@ -32,11 +42,14 @@
     <button class="link-button" id="demo-button" type="button">Load demo data</button>
     <span aria-hidden="true">·</span>
     <span>Saved automatically to your habits file</span>
+    <span aria-hidden="true">·</span>
+    <button class="link-button" id="shortcuts-button" type="button">Keyboard shortcuts (?)</button>
   </footer>
 
   <div class="toast" id="toast" role="status" hidden></div>
   <div class="modal-backdrop" id="modal" hidden></div>
   <div class="notices" id="notices" aria-live="assertive"></div>
+  <div id="celebration-root"></div>
 
   <script src="charts.js"></script>
   <script src="app.js"></script>

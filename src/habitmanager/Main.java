@@ -8,6 +8,8 @@ import habitmanager.storage.FileStorage;
 import habitmanager.ui.ConsoleUI;
 import habitmanager.web.WebServer;
 
+import javax.swing.JOptionPane;
+import java.awt.GraphicsEnvironment;
 import java.io.BufferedReader;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
@@ -15,6 +17,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 
@@ -39,7 +42,7 @@ public class Main {
         boolean openBrowser = true;
         boolean useTray = true;
         int port = DEFAULT_PORT;
-        String dataFile = DEFAULT_DATA_FILE;
+        String dataFile = null;
         try {
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
@@ -56,6 +59,9 @@ public class Main {
             System.exit(2);
         }
 
+        if (dataFile == null) {
+            dataFile = isPackaged() ? packagedDataFile().toString() : DEFAULT_DATA_FILE;
+        }
         FileStorage storage = new FileStorage(Path.of(dataFile));
         if (console) {
             runConsole(storage);
@@ -75,12 +81,48 @@ public class Main {
         Path settingsFile = storage.getFile().toAbsolutePath().resolveSibling("settings.properties");
         HabitService service = new HabitService(new HabitManager(), storage, new SettingsStorage(settingsFile),
                 Clock.systemDefaultZone());
+        service.enableAutoBackup();
         StartupManager startup = StartupManager.forThisApp(storage.getFile(), port);
         try {
-            new WebServer(service, WEB_ROOT, port, openBrowser, useTray, startup).start();
-        } catch (IOException e) {
-            System.out.println("Could not start the dashboard: " + e.getMessage());
-            System.exit(1);
+            boolean started = new WebServer(service, WEB_ROOT, port, openBrowser, useTray, startup).start();
+            if (!started) {
+                System.exit(0); // another copy is already running; its dashboard was opened
+            }
+        } catch (IOException | RuntimeException e) {
+            fail("Could not start Habit Manager: " + e.getMessage());
         }
+    }
+
+    // ---------------------------------------------------------------- packaged app (HabitManager.exe)
+
+    /** jpackage sets this property in the app it builds. */
+    static boolean isPackaged() {
+        return System.getProperty("jpackage.app-path") != null;
+    }
+
+    /**
+     * The installed app keeps its data in the user's own folder rather than next to the
+     * program: %APPDATA%\HabitManager on Windows, ~/.habitmanager elsewhere.
+     */
+    private static Path packagedDataFile() {
+        String appData = System.getenv("APPDATA");
+        Path folder = appData != null
+                ? Path.of(appData, "HabitManager")
+                : Path.of(System.getProperty("user.home"), ".habitmanager");
+        try {
+            Files.createDirectories(folder);
+        } catch (IOException e) {
+            fail("Could not create " + folder + ": " + e.getMessage());
+        }
+        return folder.resolve(DEFAULT_DATA_FILE);
+    }
+
+    /** Prints the problem, and also shows it in a dialog for the packaged app, which has no console. */
+    private static void fail(String message) {
+        System.out.println(message);
+        if (isPackaged() && !GraphicsEnvironment.isHeadless()) {
+            JOptionPane.showMessageDialog(null, message, "Habit Manager", JOptionPane.ERROR_MESSAGE);
+        }
+        System.exit(1);
     }
 }

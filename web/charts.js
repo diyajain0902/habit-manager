@@ -15,17 +15,19 @@ function renderHighlights() {
   const today = todayDate();
   const legendItems = [['Done', colorOf(habit).deep]];
   if (habit.target > 1) legendItems.push(['Part done', colorOf(habit).soft]);
-  legendItems.push(['Missed', colorOf(habit).tint], ['Rest day / not tracked', '#ffffff']);
+  legendItems.push(['Missed', colorOf(habit).tint], ['Rest day / not tracked', 'var(--card)']);
 
   return [
     h('h2', { class: 'section-title', text: 'Highlights ✨' }),
     overviewFacts(today),
     h('div', { class: 'grid grid-2', style: 'margin-top:16px' },
       chartCard('Streaks', 'Current streak vs. personal best', streakChart(),
-        legend([['Thick bar = current streak', '#a9aed0'], ['Thin bar = best ever', '#dfe2f3']])),
+        legend([['Thick bar = current streak', 'var(--muted)'], ['Thin bar = best ever', 'var(--line)']])),
       chartCard('Completion', 'Share of expected check-ins done since each habit started', completionDonuts())),
     h('div', { style: 'margin-top:16px' },
       chartCard('Daily check-ins', 'Habits completed each day over the last 30 days', trendChart(today))),
+    h('div', { style: 'margin-top:16px' },
+      chartCard('Badges 🏅', 'Earned for streaks (your best ever counts) and for total check-ins. The faded one is next.', badgeGrid())),
     h('h2', { class: 'section-title' }, 'Habit deep dive ', h('span', { class: 'hint', text: '· pick a habit' })),
     habitPills(list, habit.name, name => { ui.highlightHabit = name; render(); }),
     h('div', { class: 'grid grid-2' },
@@ -46,6 +48,26 @@ function legend(items) {
   return h('div', { class: 'legend' },
     items.map(([label, color]) => h('span', {},
       h('i', { style: `background:${color};border:1px solid ${LINE_COLOR}` }), label)));
+}
+
+/** Earned badges as medals, plus each habit's next badge faded with a progress bar. */
+function badgeGrid() {
+  const badges = [...ui.data.totalBadges, ...activeHabits().flatMap(habit => habit.badges)];
+  return h('div', { class: 'badge-grid' }, badges.map(badge => {
+    const locked = !badge.earned;
+    const percent = Math.round(Math.min(1, badge.progress / badge.goal) * 100);
+    return h('div', {
+      class: `badge${locked ? ' locked' : ''}`, style: badgeAccent(badge),
+      title: locked ? `${badge.progress} of ${badge.goal} so far` : 'Earned!',
+    },
+    h('div', { class: 'medal', 'aria-hidden': 'true' }, badgeIcon(badge)),
+    h('div', { class: 'badge-label', text: badge.label }),
+    h('div', { class: 'badge-habit', text: badge.habit ? displayName(findHabit(badge.habit) || { name: badge.habit }) : 'All habits' }),
+    locked
+      ? h('div', { class: 'badge-progress', role: 'img', 'aria-label': `${badge.progress} of ${badge.goal}` },
+        h('span', { style: `width:${percent}%` }))
+      : null);
+  }));
 }
 
 /** Habits that should have been done on the date (weekly habits never block a "perfect day"). */
@@ -164,14 +186,14 @@ function trendChart(today) {
     : null));
   const dots = points.map((p, i) => s('circle', {
     cx: x(i), cy: y(p.done), r: p.perfect ? 5 : 3.5,
-    fill: p.perfect ? '#57a5db' : '#ffffff', stroke: '#9f82e3', 'stroke-width': 2,
+    fill: p.perfect ? '#57a5db' : 'var(--card)', stroke: '#9f82e3', 'stroke-width': 2,
   }, tooltip(`${formatDate(p.date, { weekday: 'short', month: 'short', day: 'numeric' })}: ${p.done} of ${p.active} done${p.perfect ? ' (perfect day)' : ''}`)));
 
   return h('div', {},
     s('svg', { class: 'chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Daily check-ins over the last 30 days' },
       s('defs', {}, s('linearGradient', { id: 'trend-fill', x1: 0, y1: 0, x2: 0, y2: 1 },
-        s('stop', { offset: '0%', 'stop-color': '#dccff8', 'stop-opacity': 0.9 }),
-        s('stop', { offset: '100%', 'stop-color': '#c6e3f8', 'stop-opacity': 0.15 }))),
+        s('stop', { offset: '0%', 'stop-color': '#9f82e3', 'stop-opacity': 0.45 }),
+        s('stop', { offset: '100%', 'stop-color': '#57a5db', 'stop-opacity': 0.04 }))),
       grid,
       s('path', { d: area, fill: 'url(#trend-fill)' }),
       s('path', { d: line, fill: 'none', stroke: '#9f82e3', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }),
@@ -193,7 +215,7 @@ function weekdayChart(habit) {
     const isRestDay = !habit.schedule.days.includes(DAY_CODES[i]);
     const x = side + i * slot + (slot - barWidth) / 2;
     const isBest = day === habit.bestWeekday;
-    const parts = [s('rect', { x, y: top, width: barWidth, height: plotHeight, rx: 10, fill: isRestDay ? '#ffffff' : color.tint, stroke: isRestDay ? LINE_COLOR : 'none' })];
+    const parts = [s('rect', { x, y: top, width: barWidth, height: plotHeight, rx: 10, fill: isRestDay ? 'var(--card)' : color.tint, stroke: isRestDay ? LINE_COLOR : 'none' })];
     if (rate === undefined) {
       parts.push(s('text', { x: x + barWidth / 2, y: top + plotHeight / 2, 'text-anchor': 'middle', 'font-size': isRestDay ? 10 : 12 },
         isRestDay ? 'rest' : '–'));
@@ -257,7 +279,7 @@ function heatmap(habit, today) {
       const done = habit.done.has(key);
       const count = countOn(habit, key);
       const rest = !scheduledOn(habit, date);
-      let fill = '#ffffff';
+      let fill = 'var(--card)';
       let status = 'not tracked';
       if (done) { fill = color.deep; status = 'done'; }
       else if (tracked && count > 0) { fill = color.soft; status = `${count} of ${habit.target}`; }

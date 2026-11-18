@@ -231,6 +231,66 @@ public final class InsightEngine {
         return lastScheduled.size() == ATTENTION_WINDOW_DAYS && lastScheduled.stream().noneMatch(habit::isDoneOn);
     }
 
+    // ---------------------------------------------------------------- weekly summary
+
+    /**
+     * Check ins this week (Monday to today) against what was expected so far, the same for
+     * last week, and whether this week already beats every earlier week.
+     */
+    public record WeekSummary(int done, int expected, int lastWeekDone, int lastWeekExpected, boolean bestWeek) {
+    }
+
+    public static WeekSummary weekSummary(List<Habit> habits, LocalDate today) {
+        List<Habit> active = habits.stream().filter(h -> !h.isArchived()).toList();
+        LocalDate monday = StreakCalculator.weekStart(today);
+        int[] thisWeek = totals(active, monday, today);
+        int[] lastWeek = totals(active, monday.minusWeeks(1), monday.minusDays(1));
+
+        boolean best = thisWeek[1] > 0 && !active.isEmpty();
+        LocalDate firstWeek = active.stream().map(Habit::getCreatedDate).min(LocalDate::compareTo)
+                .map(StreakCalculator::weekStart).orElse(monday);
+        for (LocalDate week = firstWeek; best && week.isBefore(monday); week = week.plusWeeks(1)) {
+            if (totals(active, week, week.plusDays(6))[1] >= thisWeek[1]) {
+                best = false;
+            }
+        }
+        return new WeekSummary(thisWeek[1], thisWeek[0], lastWeek[1], lastWeek[0], best);
+    }
+
+    /** {expected, done} summed over the habits for a range inside one Monday-Sunday week. */
+    private static int[] totals(List<Habit> habits, LocalDate from, LocalDate to) {
+        int expected = 0;
+        int done = 0;
+        for (Habit habit : habits) {
+            LocalDate start = from.isBefore(habit.getCreatedDate()) ? habit.getCreatedDate() : from;
+            if (to.isBefore(start)) {
+                continue;
+            }
+            Schedule schedule = habit.getSchedule();
+            int days = (int) ChronoUnit.DAYS.between(start, to) + 1;
+            switch (schedule.getType()) {
+                case DAILY -> {
+                    expected += days;
+                    done += StreakCalculator.completionsBetween(habit, start, to);
+                }
+                case WEEKDAYS -> {
+                    for (LocalDate day = start; !day.isAfter(to); day = day.plusDays(1)) {
+                        if (schedule.isScheduledOn(day)) {
+                            expected++;
+                            done += habit.isDoneOn(day) ? 1 : 0;
+                        }
+                    }
+                }
+                case WEEKLY -> {
+                    int goal = Math.min(schedule.getTimesPerWeek(), days);
+                    expected += goal;
+                    done += Math.min(StreakCalculator.completionsBetween(habit, start, to), goal);
+                }
+            }
+        }
+        return new int[] {expected, done};
+    }
+
     /** The last {@code days} days ending today, oldest first. */
     public static List<DayStatus> history(Habit habit, LocalDate today, int days) {
         List<DayStatus> result = new ArrayList<>();

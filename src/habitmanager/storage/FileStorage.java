@@ -68,13 +68,19 @@ public class FileStorage {
 
     /** Loads all habits. A missing file is not an error: it just means there is no data yet. */
     public LoadResult load() throws IOException {
+        if (!Files.exists(file)) {
+            return new LoadResult(new ArrayList<>(), new ArrayList<>(), false);
+        }
+        return parseLines(Files.readAllLines(file, StandardCharsets.UTF_8), file.getFileName().toString());
+    }
+
+    /**
+     * Parses the contents of a habits file (either format). Used for loading, for undo
+     * snapshots and for importing backups. Bad lines become warnings, never exceptions.
+     */
+    public static LoadResult parseLines(List<String> lines, String sourceName) {
         List<Habit> habits = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
-        if (!Files.exists(file)) {
-            return new LoadResult(habits, warnings, false);
-        }
-
-        List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
         boolean legacy = lines.stream().filter(l -> !l.isBlank()).findFirst()
                 .map(first -> !first.startsWith(HEADER_PREFIX)).orElse(false);
 
@@ -92,7 +98,7 @@ public class FileStorage {
                 }
                 habits.add(habit);
             } catch (IllegalArgumentException | DateTimeParseException e) {
-                warnings.add("Skipping malformed line " + lineNumber + " in " + file.getFileName()
+                warnings.add("Skipping malformed line " + lineNumber + " in " + sourceName
                         + ": " + e.getMessage());
             }
         }
@@ -104,9 +110,7 @@ public class FileStorage {
         if (isLegacyFile()) {
             backupLegacyFile(); // never overwrite an old-format file without keeping a copy
         }
-        List<String> lines = new ArrayList<>();
-        lines.add(HEADER);
-        habits.forEach(h -> lines.add(formatLine(h)));
+        List<String> lines = toLines(habits);
 
         Path absolute = file.toAbsolutePath();
         Path temp = absolute.resolveSibling(absolute.getFileName() + ".tmp");
@@ -129,6 +133,14 @@ public class FileStorage {
             Files.copy(absolute, backup);
         }
         return backup;
+    }
+
+    /** The full file contents (header plus one line per habit) in the current format. */
+    public static List<String> toLines(Collection<Habit> habits) {
+        List<String> lines = new ArrayList<>();
+        lines.add(HEADER);
+        habits.forEach(h -> lines.add(formatLine(h)));
+        return lines;
     }
 
     /** True if the file exists, has content, and does not start with the format 2 header. */

@@ -22,7 +22,7 @@ const WEEKDAYS = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATUR
 const WEEKDAY_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const DAY_CODES = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 const EMOJI_CHOICES = ['💧', '🏃', '📚', '🧘', '💪', '🥗', '😴', '🧠', '✍️', '🎵', '🧹', '💊', '🚶', '🦷', '☀️', '🫧'];
-const LINE_COLOR = '#e7e9f6';
+const LINE_COLOR = 'var(--line)';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const NOTICE_POLL_MS = 20000;
 
@@ -104,10 +104,27 @@ const archivedHabits = () => habits().filter(habit => habit.archived);
 const todayDate = () => parseISO(ui.data.today);
 const findHabit = name => habits().find(habit => habit.name === name);
 
-/** The habit's chosen colour, or one picked from its position in the list. */
+/** True when the page is showing the dark theme (chosen, or following the system). */
+function isDark() {
+  const chosen = document.documentElement.dataset.theme;
+  if (chosen) return chosen === 'dark';
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+function rgba(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+/**
+ * The habit's chosen colour, or one picked from its position in the list. In dark mode
+ * the pale fills become translucent glows of the same colour, so they sit nicely on navy.
+ */
 function colorOf(habit) {
   const index = habit.color !== null && habit.color !== undefined ? habit.color : habits().indexOf(habit);
-  return PALETTE[((index % PALETTE.length) + PALETTE.length) % PALETTE.length];
+  const base = PALETTE[((index % PALETTE.length) + PALETTE.length) % PALETTE.length];
+  if (!isDark()) return base;
+  return { deep: base.deep, soft: rgba(base.deep, 0.5), tint: rgba(base.deep, 0.16) };
 }
 
 function accentStyle(color) {
@@ -147,21 +164,68 @@ async function request(method, path, params) {
   return body;
 }
 
-/** Stores a full state response, adding quick lookups to each habit. */
-function setState(body) {
+/** Sends a file's text as the raw body (used for importing backups). */
+async function requestText(path, text) {
+  let response;
+  try {
+    response = await fetch(path, { method: 'POST', headers: { 'X-Habit-Client': '1', 'Content-Type': 'text/plain' }, body: text });
+  } catch (e) {
+    throw new Error('Cannot reach the Habit Manager server. Is it still running?');
+  }
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || 'Something went wrong.');
+  return body;
+}
+
+/** Every badge earned so far (archived habits don't count). */
+function earnedBadges(body) {
+  const all = [...body.totalBadges, ...body.habits.filter(h => !h.archived).flatMap(h => h.badges)];
+  return all.filter(badge => badge.earned);
+}
+
+/**
+ * Stores a full state response, adding quick lookups to each habit. With celebrate, a
+ * badge that was not earned before this change gets a celebration popup.
+ */
+function setState(body, celebrate = false) {
   for (const habit of body.habits) {
     habit.done = new Set(habit.completedDates);
     habit.checkInMap = new Map(habit.checkIns.map(c => [c.date, c]));
   }
+  const earned = earnedBadges(body);
+  const fresh = celebrate && ui.earnedIds ? earned.filter(badge => !ui.earnedIds.has(badge.id)) : [];
+  ui.earnedIds = new Set(earned.map(badge => badge.id));
   ui.data = body;
+  if (fresh.length) {
+    showCelebration(fresh.reduce((best, badge) => (badge.goal > best.goal ? badge : best)));
+  }
 }
 
-/** POST a change, re-render, and show a toast. */
+/** Changes that can earn a badge. */
+const CELEBRATE_PATHS = ['/api/checkin', '/api/progress', '/api/toggle'];
+
+/** POST a change, re-render, and show a toast with an Undo button. */
 async function act(path, params, successMessage) {
   try {
-    setState(await request('POST', path, params));
+    setState(await request('POST', path, params), CELEBRATE_PATHS.includes(path));
     render();
-    if (successMessage) toast(successMessage);
+    if (successMessage) toast(successMessage, false, true);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/** Ctrl+Z: rolls back the last change of any kind (check in, edit, delete, import...). */
+async function undoLast() {
+  if (!ui.data || !ui.data.undoLabel) {
+    toast('Nothing to undo');
+    return;
+  }
+  try {
+    const body = await request('POST', '/api/history/undo', {});
+    setState(body);
+    render();
+    toast(`Undid: ${body.undone}`);
   } catch (e) {
     toast(e.message, true);
   }
@@ -179,13 +243,64 @@ async function refresh() {
 // ------------------------------------------------------------------ toast & modal
 
 let toastTimer;
-function toast(message, isError = false) {
+/** A short message at the bottom. With undoable, it offers an Undo button (same as Ctrl+Z). */
+function toast(message, isError = false, undoable = false) {
   const node = document.getElementById('toast');
-  node.textContent = message;
+  node.replaceChildren(h('span', { text: message }));
+  if (undoable) {
+    node.append(h('button', { class: 'toast-undo', type: 'button', text: 'Undo',
+      onclick: () => { node.hidden = true; undoLast(); } }));
+  }
   node.classList.toggle('error', isError);
   node.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { node.hidden = true; }, isError ? 4500 : 2600);
+  toastTimer = setTimeout(() => { node.hidden = true; }, isError ? 4500 : (undoable ? 5000 : 2600));
+}
+
+// ------------------------------------------------------------------ badges & celebration
+
+function badgeIcon(badge) {
+  if (!badge.habit) return badge.goal >= 500 ? '💎' : '🎖️';
+  const weeks = badge.label.includes('week');
+  const g = badge.goal;
+  if (weeks ? g >= 26 : g >= 100) return '👑';
+  if (weeks ? g >= 12 : g >= 30) return '🏆';
+  if (weeks ? g >= 8 : g >= 14) return '🥇';
+  if (weeks ? g >= 4 : g >= 7) return '🌟';
+  return '✨';
+}
+
+function badgeAccent(badge) {
+  const habit = badge.habit ? findHabit(badge.habit) : null;
+  return habit ? accentStyle(colorOf(habit)) : null;
+}
+
+let celebrationTimer;
+/** A popup with the new badge while bubbles float up the screen. */
+function showCelebration(badge) {
+  const root = document.getElementById('celebration-root');
+  const close = () => { clearTimeout(celebrationTimer); root.replaceChildren(); };
+  const bubbles = Array.from({ length: 18 }, () => {
+    const size = 16 + Math.random() * 44;
+    return h('span', {
+      class: 'float-bubble', 'aria-hidden': 'true',
+      style: `left:${Math.random() * 100}%;width:${size}px;height:${size}px;`
+        + `animation-duration:${4 + Math.random() * 4}s;animation-delay:${Math.random() * 1.2}s;--drift:${Math.round(Math.random() * 120 - 60)}px`,
+    });
+  });
+  const yay = h('button', { class: 'btn', type: 'button', text: 'Yay! 🫧', onclick: close });
+  const overlay = h('div', { class: 'celebration', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'New badge',
+    onclick: event => { if (event.target === overlay) close(); } },
+  bubbles,
+  h('div', { class: 'card', style: badgeAccent(badge) },
+    h('div', { class: 'medal badge-medal', 'aria-hidden': 'true' }, badgeIcon(badge)),
+    h('h2', { text: 'New badge! 🎉' }),
+    h('p', { text: badge.habit ? `${badge.label} on ${badge.habit}` : `${badge.label} in total. Amazing!` }),
+    yay));
+  root.replaceChildren(overlay);
+  yay.focus();
+  clearTimeout(celebrationTimer);
+  celebrationTimer = setTimeout(close, 9000);
 }
 
 /**
@@ -253,6 +368,7 @@ function render() {
   for (const tab of document.querySelectorAll('.tab')) {
     tab.setAttribute('aria-selected', String(tab.dataset.tab === ui.tab));
   }
+  updateThemeButton();
   const root = document.getElementById('app');
   const views = { today: renderToday, calendar: renderCalendar, highlights: renderHighlights, settings: renderSettings };
   root.replaceChildren(...views[ui.tab]().filter(Boolean));
@@ -306,7 +422,7 @@ function summaryCards() {
 
   return h('div', {},
     h('h2', { class: 'section-title', text: greeting() }),
-    h('div', { class: 'grid grid-3' },
+    h('div', { class: 'grid grid-4' },
       h('div', { class: 'card stat-card' },
         progressRing(doneToday, total),
         h('div', {},
@@ -326,7 +442,26 @@ function summaryCards() {
           h('div', { class: 'label', text: 'Needs some love' }),
           attention.length
             ? h('div', { class: 'chip-list' }, attention.map(name => h('span', { class: 'chip', text: name })))
-            : h('div', { class: 'sub', text: 'Nothing has been missed lately' })))));
+            : h('div', { class: 'sub', text: 'Nothing has been missed lately' }))),
+      weekCard()));
+}
+
+/** "This week: 18 / 21" with a bar, compared with last week, and a cheer for the best week yet. */
+function weekCard() {
+  const week = ui.data.week;
+  const percent = week.expected ? Math.round(week.done * 100 / week.expected) : 0;
+  let sub = 'check-ins so far this week';
+  if (week.lastWeekExpected) sub = `last week: ${week.lastWeekDone} / ${week.lastWeekExpected}`;
+  return h('div', { class: 'card stat-card' },
+    h('div', { class: 'stat-icon', style: 'background:var(--sky)', 'aria-hidden': 'true' }, '📆'),
+    h('div', { style: 'flex:1;min-width:0' },
+      h('div', { class: 'label', text: 'This week' }),
+      h('div', { class: 'value', text: `${week.done} / ${week.expected}` }),
+      week.bestWeek
+        ? h('div', { class: 'sub best-week', text: 'Best week yet! 🎉' })
+        : h('div', { class: 'sub', text: sub }),
+      h('div', { class: 'week-bar', role: 'img', 'aria-label': `${percent}% of this week's check-ins done` },
+        h('span', { style: `width:${percent}%` }))));
 }
 
 function progressRing(done, total) {
@@ -413,17 +548,33 @@ function habitCard(habit) {
   return card;
 }
 
+/**
+ * What tapping a habit's circle (or pressing its number key) does: a simple habit is
+ * toggled done / not done; a habit with a target gets one more towards it.
+ */
+function tapHabit(habit) {
+  if (habit.target <= 1) {
+    return habit.doneToday
+      ? act('/api/undo', { name: habit.name }, `Unchecked "${habit.name}" for today`)
+      : act('/api/checkin', { name: habit.name }, celebrate(habit));
+  }
+  if (habit.doneToday) {
+    toast(`"${habit.name}" target already reached today ✨`);
+    return Promise.resolve();
+  }
+  const next = habit.todayCount + 1;
+  return act('/api/progress', { name: habit.name, delta: 1 },
+    next >= habit.target ? celebrate(habit) : `${habit.emoji || '✓'} ${next} of ${habit.target}`);
+}
+
 /** A tick button for simple habits; a progress ring with + / − for habits with a target. */
 function checkControl(habit) {
   if (habit.target <= 1) {
-    const toggleToday = () => (habit.doneToday
-      ? act('/api/undo', { name: habit.name }, `Undid today for "${habit.name}"`)
-      : act('/api/checkin', { name: habit.name }, celebrate(habit)));
     return h('button', {
       class: 'check', type: 'button', text: '✓',
       'aria-pressed': String(habit.doneToday),
       'aria-label': `${habit.doneToday ? 'Undo' : 'Mark'} "${habit.name}" ${habit.doneToday ? 'for today' : 'done today'}`,
-      onclick: toggleToday,
+      onclick: () => tapHabit(habit),
     });
   }
 
@@ -435,16 +586,10 @@ function checkControl(habit) {
       cx: 24, cy: 24, r, fill: 'none', stroke: 'var(--accent-deep)', 'stroke-width': 5, 'stroke-linecap': 'round',
       'stroke-dasharray': `${circumference * Math.min(1, count / habit.target)} ${circumference}`, transform: 'rotate(-90 24 24)',
     }) : null);
-  const plusOne = () => {
-    if (habit.doneToday) { toast(`"${habit.name}" target already reached today ✨`); return; }
-    const next = count + 1;
-    act('/api/progress', { name: habit.name, delta: 1 },
-      next >= habit.target ? celebrate(habit) : `${habit.emoji || '✓'} ${next} of ${habit.target}`);
-  };
   return h('div', { class: 'counter' },
     h('button', {
       class: `check ring${habit.doneToday ? ' full' : ''}`, type: 'button',
-      'aria-label': `Add one to "${habit.name}": ${count} of ${habit.target} done today`, onclick: plusOne,
+      'aria-label': `Add one to "${habit.name}": ${count} of ${habit.target} done today`, onclick: () => tapHabit(habit),
     }, ring, h('span', { class: 'ring-count', text: habit.doneToday ? '✓' : `${count}/${habit.target}` })),
     count > 0 ? h('button', {
       class: 'minus', type: 'button', text: '−', title: 'Remove one',
@@ -469,6 +614,8 @@ function habitMeta(habit, resting) {
     chips.push(h('span', { class: 'rest-chip', text: habit.schedule.type === 'WEEKLY' ? '✨ weekly goal met' : '💤 rest day' }));
   }
   if (habit.needsAttention) chips.push(h('span', { class: 'attention', text: 'needs some love' }));
+  const topBadge = habit.badges.filter(badge => badge.earned).pop();
+  if (topBadge) chips.push(h('span', { class: 'badge-chip', title: 'Best badge', text: `${badgeIcon(topBadge)} ${topBadge.label}` }));
   if (habit.todayNote) chips.push(h('span', { class: 'note-chip', title: habit.todayNote, text: `📝 ${truncate(habit.todayNote, 36)}` }));
   return h('div', { class: 'habit-meta' }, chips);
 }
@@ -636,11 +783,11 @@ function openHabitDialog(habit, presetName = '') {
       if (isNew) {
         setState(await request('POST', '/api/habits/add', { ...params, name: nameInput.value }));
         render();
-        toast(`"${nameInput.value.trim()}" added 🫧`);
+        toast(`"${nameInput.value.trim()}" added 🫧`, false, true);
       } else {
         setState(await request('POST', '/api/habits/update', { ...params, name: habit.name, newName: nameInput.value }));
         render();
-        toast('Saved ✓');
+        toast('Saved ✓', false, true);
       }
     },
   });
@@ -662,7 +809,7 @@ function editNote(habit, dateKey) {
     onConfirm: async value => {
       setState(await request('POST', '/api/note', { name: habit.name, date: dateKey, note: value }));
       render();
-      toast(value.trim() ? 'Note saved 📝' : 'Note removed');
+      toast(value.trim() ? 'Note saved 📝' : 'Note removed', false, true);
     },
   });
 }
@@ -670,13 +817,13 @@ function editNote(habit, dateKey) {
 function deleteHabit(habit) {
   openModal({
     title: `Delete "${habit.name}"?`,
-    message: 'This removes the habit and all of its history. It cannot be undone. (Archive keeps the history instead.)',
+    message: 'This removes the habit and all of its history. You can undo it with Ctrl+Z straight away, but not after the app restarts. (Archive keeps the history instead.)',
     confirmLabel: 'Delete',
     danger: true,
     onConfirm: async () => {
       setState(await request('POST', '/api/habits/delete', { name: habit.name }));
       render();
-      toast('Habit deleted');
+      toast('Habit deleted', false, true);
     },
   });
 }
@@ -691,7 +838,7 @@ function confirmDemo() {
       setState(await request('POST', '/api/demo', {}));
       ui.calendarHabit = ui.highlightHabit = ui.calendarDay = null;
       render();
-      toast('Demo data loaded ✨');
+      toast('Demo data loaded ✨', false, true);
     },
   });
 }
@@ -879,8 +1026,156 @@ function renderSettings() {
         st.startAtLoginSupported
           ? switchRow('Start with Windows', 'Opens quietly in the tray when you log in, so reminders just work.', st.startAtLogin,
             v => save({ startAtLogin: v }, v ? 'Will start with Windows 🚀' : 'Will not start with Windows'))
-          : h('p', { class: 'hint', text: 'Starting automatically is only available on Windows.' }))),
+          : h('p', { class: 'hint', text: 'Starting automatically is only available on Windows.' })),
+      appearanceCard(),
+      dataCard()),
   ];
+}
+
+function appearanceCard() {
+  const select = h('select', { 'aria-label': 'Theme', onchange: e => { setTheme(e.target.value); render(); } },
+    h('option', { value: 'auto', text: 'Auto (match my computer)' }),
+    h('option', { value: 'light', text: 'Light ☀️' }),
+    h('option', { value: 'dark', text: 'Dark 🌙' }));
+  select.value = savedTheme();
+  return h('section', { class: 'card' },
+    h('h3', { text: '🎨 Appearance' }),
+    h('div', { class: 'setting-row' },
+      h('div', {},
+        h('div', { class: 'setting-title', text: 'Theme' }),
+        h('div', { class: 'hint', text: 'Pastel by day, glowing by night. Saved in this browser.' })),
+      select),
+    h('div', { class: 'setting-row' },
+      h('div', {},
+        h('div', { class: 'setting-title', text: 'Keyboard shortcuts' }),
+        h('div', { class: 'hint', text: 'Check in with 1–9, undo with Ctrl+Z, and more.' })),
+      h('button', { class: 'btn secondary small', type: 'button', text: 'Show', onclick: showShortcuts })));
+}
+
+/** Downloads (CSV and full backup) and importing a backup. */
+function dataCard() {
+  const fileInput = h('input', { type: 'file', accept: '.txt,text/plain', 'aria-label': 'Backup file to import' });
+  const modeSelect = h('select', { 'aria-label': 'Import mode' },
+    h('option', { value: 'merge', text: 'Merge with my habits' }),
+    h('option', { value: 'replace', text: 'Replace all my habits' }));
+
+  const runImport = async () => {
+    const file = fileInput.files[0];
+    if (!file) { toast('Choose a backup file first', true); return; }
+    const mode = modeSelect.value;
+    const doImport = async () => {
+      const body = await requestText(`/api/import?mode=${mode}`, await file.text());
+      setState(body);
+      render();
+      const r = body.imported;
+      const parts = mode === 'replace'
+        ? [`${r.replaced} habit${r.replaced === 1 ? '' : 's'} restored`]
+        : [`${r.added} added`, `${r.merged} merged`];
+      if (r.skippedLines) parts.push(`${r.skippedLines} broken line${r.skippedLines === 1 ? '' : 's'} skipped`);
+      toast(`Imported: ${parts.join(', ')} 🫧`, false, true);
+    };
+    if (mode === 'replace') {
+      openModal({
+        title: 'Replace all habits?',
+        message: `Your current habits will be replaced by the ones in "${file.name}". You can undo this with Ctrl+Z.`,
+        confirmLabel: 'Replace',
+        danger: true,
+        onConfirm: doImport,
+      });
+    } else {
+      try { await doImport(); } catch (e) { toast(e.message, true); }
+    }
+  };
+
+  return h('section', { class: 'card' },
+    h('h3', { text: '💾 Your data' }),
+    h('div', { class: 'data-actions' },
+      h('a', { class: 'btn secondary small', href: '/api/export/backup', download: '' }, '⬇️ Download backup'),
+      h('a', { class: 'btn secondary small', href: '/api/export/csv', download: '' }, '📊 Export CSV')),
+    h('p', { class: 'hint', text: 'The backup holds all your habits and their history. The CSV opens in Excel or Google Sheets. '
+      + 'A safety copy is also saved automatically each day (the last 14 days) in the "backups" folder next to your habits file.' }),
+    h('div', { class: 'setting-title', style: 'margin-top:12px', text: 'Import a backup' }),
+    h('div', { class: 'import-row' }, fileInput, modeSelect,
+      h('button', { class: 'btn small', type: 'button', text: 'Import', onclick: runImport })));
+}
+
+// ------------------------------------------------------------------ theme
+
+function savedTheme() {
+  try {
+    const value = localStorage.getItem('habit-theme');
+    return value === 'light' || value === 'dark' ? value : 'auto';
+  } catch (e) {
+    return 'auto';
+  }
+}
+
+/** 'light', 'dark' or 'auto' (follow the computer). Remembered in this browser only. */
+function setTheme(value) {
+  const root = document.documentElement;
+  if (value === 'auto') delete root.dataset.theme; else root.dataset.theme = value;
+  try {
+    if (value === 'auto') localStorage.removeItem('habit-theme'); else localStorage.setItem('habit-theme', value);
+  } catch (e) { /* storage unavailable: the choice lasts until the page is closed */ }
+}
+
+function updateThemeButton() {
+  const button = document.getElementById('theme-toggle');
+  const dark = isDark();
+  button.textContent = dark ? '☀️' : '🌙';
+  button.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
+}
+
+// ------------------------------------------------------------------ keyboard shortcuts
+
+const SHORTCUTS = [
+  ['1 – 9', 'Check in habit 1 to 9 (or add one towards its target)'],
+  ['Ctrl + Z', 'Undo the last change'],
+  ['N', 'New habit'],
+  ['T  C  H  S', 'Today, Calendar, Highlights, Settings'],
+  ['D', 'Switch between light and dark'],
+  ['?', 'Show this list'],
+];
+
+function showShortcuts() {
+  openModal({
+    title: 'Keyboard shortcuts ⌨️',
+    body: h('ul', { class: 'shortcut-list' }, SHORTCUTS.map(([keys, what]) =>
+      h('li', {}, keys.split('  ').map(k => h('kbd', { text: k })), what))),
+    confirmLabel: 'Got it',
+    onConfirm: () => {},
+  });
+}
+
+function goTo(tab) {
+  if (location.hash !== `#${tab}`) location.hash = tab; // hashchange re-renders
+}
+
+function onShortcut(event) {
+  if (!document.getElementById('modal').hidden) return; // the dialog handles its own keys
+  if (document.querySelector('.celebration')) return;
+  const target = event.target;
+  if (target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+
+  const key = event.key;
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && key.toLowerCase() === 'z') {
+    event.preventDefault();
+    undoLast();
+    return;
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+  if (/^[1-9]$/.test(key)) {
+    const habit = activeHabits()[Number(key) - 1];
+    if (habit && ui.data) tapHabit(habit);
+    return;
+  }
+  const tabs = { t: 'today', c: 'calendar', h: 'highlights', s: 'settings' };
+  const lower = key.toLowerCase();
+  if (tabs[lower]) { goTo(tabs[lower]); return; }
+  if (lower === 'n') { event.preventDefault(); goTo('today'); openHabitDialog(null); return; }
+  if (lower === 'd') { setTheme(isDark() ? 'light' : 'dark'); render(); return; }
+  if (key === '?') showShortcuts();
 }
 
 function switchRow(title, hint, checked, onChange, extra = null, disabled = false) {
@@ -981,10 +1276,25 @@ function showNotice(notice) {
 
 // ------------------------------------------------------------------ wiring
 
-for (const tab of document.querySelectorAll('.tab')) {
-  tab.addEventListener('click', () => { ui.tab = tab.dataset.tab; render(); });
+// Each tab has its own address (#today, #calendar, #highlights, #settings), so the browser's
+// back button and bookmarks work.
+const TABS = ['today', 'calendar', 'highlights', 'settings'];
+function tabFromHash() {
+  const name = location.hash.slice(1);
+  return TABS.includes(name) ? name : 'today';
 }
+ui.tab = tabFromHash();
+window.addEventListener('hashchange', () => { ui.tab = tabFromHash(); render(); });
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.addEventListener('click', () => goTo(tab.dataset.tab));
+}
+
 document.getElementById('demo-button').addEventListener('click', confirmDemo);
+document.getElementById('shortcuts-button').addEventListener('click', showShortcuts);
+document.getElementById('theme-toggle').addEventListener('click', () => { setTheme(isDark() ? 'light' : 'dark'); render(); });
+document.addEventListener('keydown', onShortcut);
+// Following the computer's theme: redraw the charts when it switches.
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => render());
 
 // Re-fetch when the tab regains focus, so "today" rolls over after midnight.
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

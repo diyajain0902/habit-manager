@@ -19,6 +19,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeParseException;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -47,6 +48,10 @@ import java.util.Map;
  *                            streakAlertTime, dayEndsAt, startAtLogin
  * POST /api/notifications/snooze   name, minutes
  * POST /api/notifications/test
+ * POST /api/history/undo            undo the last change (any kind)
+ * GET  /api/export/csv              all check ins as a CSV download
+ * GET  /api/export/backup           a complete backup (habits.txt contents) as a download
+ * POST /api/import?mode=merge|replace   body: the backup file as text/plain
  *
  * details: schedule (DAILY | WEEKDAYS | WEEKLY), days (MON,WED,...), timesPerWeek,
  *          target, reminder (HH:mm or empty), color (0-5 or empty), emoji
@@ -61,6 +66,9 @@ class ApiHandler implements HttpHandler {
      * changing your habits through your browser (CSRF).
      */
     static final String CLIENT_HEADER = "X-Habit-Client";
+
+    /** Backups are tiny; anything bigger than this is not one. */
+    static final int MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 
     private final HabitService service;
     private final List<String> loadWarnings;
@@ -109,13 +117,46 @@ class ApiHandler implements HttpHandler {
                 long after = query.containsKey("after") ? parseLong(query.get("after"), "after") : 0;
                 sendJson(exchange, 200, StateSerializer.noticesJson(notifications.after(after), notifications.latestId()));
             }
+            case "/api/export/csv" -> sendDownload(exchange, "text/csv; charset=utf-8",
+                    "habits-" + service.today() + ".csv", service.exportCsv());
+            case "/api/export/backup" -> sendDownload(exchange, "text/plain; charset=utf-8",
+                    "habit-manager-backup-" + service.today() + ".txt", service.exportBackup());
             default -> sendError(exchange, 404, "Not found.");
         }
+    }
+
+    /**
+     * Imports a backup file sent as the raw request body (text/plain), merging or replacing
+     * depending on ?mode=merge|replace. Answers with the new state plus an "imported" summary.
+     */
+    private void handleImport(HttpExchange exchange) throws IOException {
+        byte[] body = exchange.getRequestBody().readNBytes(MAX_IMPORT_BYTES + 1);
+        if (body.length > MAX_IMPORT_BYTES) {
+            throw new IllegalArgumentException("That file is too big to be a Habit Manager backup.");
+        }
+        Map<String, String> query = parseUrlEncoded(exchange.getRequestURI().getRawQuery());
+        boolean replace = "replace".equals(query.get("mode"));
+        HabitService.ImportReport report = service.importBackup(new String(body, StandardCharsets.UTF_8), replace);
+        Map<String, String> summary = new LinkedHashMap<>();
+        summary.put("added", Json.number(report.result().added()));
+        summary.put("merged", Json.number(report.result().merged()));
+        summary.put("replaced", Json.number(report.result().replaced()));
+        summary.put("skippedLines", Json.number(report.warnings().size()));
+        sendState(exchange, Map.of("imported", Json.object(summary)));
     }
 
     private void handlePost(HttpExchange exchange, String path) throws IOException {
         if (exchange.getRequestHeaders().getFirst(CLIENT_HEADER) == null) {
             sendError(exchange, 403, "Missing " + CLIENT_HEADER + " header.");
+            return;
+        }
+        if (path.equals("/api/import")) {
+            handleImport(exchange);
+            return;
+        }
+        if (path.equals("/api/history/undo")) {
+            String undone = service.undoLast();
+            sendState(exchange, Map.of("undone", Json.quote(undone)));
             return;
         }
         Map<String, String> form = parseUrlEncoded(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
@@ -262,8 +303,27 @@ class ApiHandler implements HttpHandler {
     // ---------------------------------------------------------------- responses
 
     private void sendState(HttpExchange exchange) throws IOException {
+        sendState(exchange, Map.of());
+    }
+
+    private void sendState(HttpExchange exchange, Map<String, String> extras) throws IOException {
         LocalDate today = service.today();
-        sendJson(exchange, 200, service.read(habits -> StateSerializer.toJson(habits, today, loadWarnings)));
+        String undoLabel = service.undoLabel();
+        sendJson(exchange, 200, service.read(habits ->
+                StateSerializer.toJson(habits, today, loadWarnings, undoLabel, extras)));
+    }
+
+    /** Sends text as a file download (the browser saves it instead of showing it). */
+    private static void sendDownload(HttpExchange exchange, String contentType, String fileName, String text)
+            throws IOException {
+        byte[] body = text.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", contentType);
+        exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        exchange.sendResponseHeaders(200, body.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(body);
+        }
     }
 
     private void sendSettings(HttpExchange exchange) throws IOException {
