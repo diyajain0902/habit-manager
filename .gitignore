@@ -1,12 +1,15 @@
 # Compiled classes
 out/
 *.class
+build/
+dist/
 
 # Personal habit data (created at runtime)
 habits.txt
 habits.txt.tmp
 habits.txt.v1.bak
 settings.properties
+backups/
 
 # IDE / OS files
 .idea/

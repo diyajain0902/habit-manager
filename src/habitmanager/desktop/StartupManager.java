@@ -69,8 +69,15 @@ public final class StartupManager {
         return startupFolder.resolve(SCRIPT_NAME);
     }
 
-    /** javaw (no console window) with the same classpath and data file as this run. */
+    /**
+     * The packaged app (HabitManager.exe, whose path jpackage puts in "jpackage.app-path"),
+     * or else javaw (no console window) with the same classpath and data file as this run.
+     */
     private static String buildLaunchCommand(Path dataFile, int port) {
+        String appPath = System.getProperty("jpackage.app-path");
+        if (appPath != null) {
+            return "\"" + appPath + "\" --no-browser --port " + port;
+        }
         String javaw = ProcessHandle.current().info().command()
                 .map(Path::of)
                 .map(java -> java.resolveSibling("javaw.exe"))

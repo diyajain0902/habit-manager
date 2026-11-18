@@ -9,9 +9,13 @@ import habitmanager.service.HabitService;
 
 import java.awt.Desktop;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.BindException;
+import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -41,24 +45,41 @@ public class WebServer {
         this.startup = startup;
     }
 
-    public void start() throws IOException {
-        if (!Files.isRegularFile(webRoot.resolve("index.html"))) {
-            throw new IOException("Cannot find " + webRoot.toAbsolutePath().resolve("index.html")
-                    + ". Run the app from the project folder.");
+    /**
+     * Starts everything. Returns false (after opening the dashboard) if Habit Manager is
+     * already running on this port, e.g. when the app is double-clicked a second time.
+     */
+    public boolean start() throws IOException {
+        Path diskRoot = Files.isRegularFile(webRoot.resolve("index.html")) ? webRoot : null;
+        if (!StaticFileHandler.dashboardAvailable(diskRoot)) {
+            throw new IOException("Cannot find the dashboard files (" + webRoot.toAbsolutePath().resolve("index.html")
+                    + "). Run the app from the project folder.");
         }
+        String url = "http://localhost:" + port + "/";
+
+        HttpServer server;
+        try {
+            server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 0);
+        } catch (BindException e) {
+            if (isHabitManagerAt(url)) {
+                System.out.println("Habit Manager is already running at " + url + ". Opening it.");
+                openBrowser(url);
+                return false;
+            }
+            throw new IOException("Port " + port + " is used by another program. Start with --port 9000 (or another number).");
+        }
+
         List<String> warnings = service.load();
         warnings.forEach(w -> System.out.println("Warning: " + w));
 
-        String url = "http://localhost:" + port + "/";
         NotificationCenter notifications = new NotificationCenter();
         Optional<TrayController> tray = useTray
                 ? TrayController.install(service, () -> openBrowser(url))
                 : Optional.empty();
         tray.ifPresent(notifications::addNotifier);
 
-        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 0);
         server.createContext("/api/", new ApiHandler(service, warnings, notifications, startup, tray.isPresent()));
-        server.createContext("/", new StaticFileHandler(webRoot));
+        server.createContext("/", new StaticFileHandler(diskRoot));
         server.start();
 
         ReminderScheduler scheduler = new ReminderScheduler(service, notifications);
@@ -77,9 +98,27 @@ public class WebServer {
         if (openBrowser) {
             openBrowser(url);
         }
+        return true;
     }
 
-    private static void openBrowser(String url) {
+    /** Asks whatever is listening on the port whether it is a Habit Manager. */
+    private static boolean isHabitManagerAt(String url) {
+        try {
+            HttpURLConnection connection = (HttpURLConnection) URI.create(url + "api/settings").toURL().openConnection();
+            connection.setConnectTimeout(2000);
+            connection.setReadTimeout(2000);
+            try (InputStream in = connection.getInputStream()) {
+                return connection.getResponseCode() == 200
+                        && new String(in.readAllBytes(), StandardCharsets.UTF_8).contains("\"remindersEnabled\"");
+            } finally {
+                connection.disconnect();
+            }
+        } catch (IOException | IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    public static void openBrowser(String url) {
         try {
             if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
                 Desktop.getDesktop().browse(URI.create(url));

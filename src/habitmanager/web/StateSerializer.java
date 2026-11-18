@@ -8,6 +8,7 @@ import habitmanager.reminders.NotificationCenter;
 import habitmanager.service.InsightEngine;
 import habitmanager.service.InsightEngine.DayStatus;
 import habitmanager.service.InsightEngine.OverallSummary;
+import habitmanager.service.Milestones;
 import habitmanager.service.StreakCalculator;
 import habitmanager.settings.Settings;
 
@@ -34,12 +35,46 @@ final class StateSerializer {
     // ---------------------------------------------------------------- state
 
     static String toJson(List<Habit> habits, LocalDate today, List<String> warnings) {
+        return toJson(habits, today, warnings, null, Map.of());
+    }
+
+    /**
+     * @param undoLabel what Ctrl+Z would undo, or null
+     * @param extras    extra top-level fields (already JSON), e.g. the result of an import
+     */
+    static String toJson(List<Habit> habits, LocalDate today, List<String> warnings,
+                         String undoLabel, Map<String, String> extras) {
         Map<String, String> root = new LinkedHashMap<>();
         root.put("today", Json.quote(today.toString()));
         root.put("summary", summaryJson(habits, today));
+        root.put("week", weekJson(InsightEngine.weekSummary(habits, today)));
+        root.put("totalBadges", Json.array(Milestones.totalBadges(habits).stream().map(StateSerializer::badgeJson).toList()));
         root.put("habits", Json.array(habits.stream().map(h -> habitJson(h, today)).toList()));
+        root.put("undoLabel", Json.quote(undoLabel));
         root.put("warnings", Json.array(warnings.stream().map(Json::quote).toList()));
+        root.putAll(extras);
         return Json.object(root);
+    }
+
+    private static String weekJson(InsightEngine.WeekSummary week) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        fields.put("done", Json.number(week.done()));
+        fields.put("expected", Json.number(week.expected()));
+        fields.put("lastWeekDone", Json.number(week.lastWeekDone()));
+        fields.put("lastWeekExpected", Json.number(week.lastWeekExpected()));
+        fields.put("bestWeek", Json.bool(week.bestWeek()));
+        return Json.object(fields);
+    }
+
+    private static String badgeJson(Milestones.Badge badge) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        fields.put("id", Json.quote(badge.id()));
+        fields.put("habit", Json.quote(badge.habit()));
+        fields.put("label", Json.quote(badge.label()));
+        fields.put("goal", Json.number(badge.goal()));
+        fields.put("earned", Json.bool(badge.earned()));
+        fields.put("progress", Json.number(badge.progress()));
+        return Json.object(fields);
     }
 
     private static String summaryJson(List<Habit> habits, LocalDate today) {
@@ -87,6 +122,7 @@ final class StateSerializer {
         fields.put("worstWeekday", Json.quote(InsightEngine.worstWeekday(habit, today).map(Enum::name).orElse(null)));
         fields.put("lastSevenDays", Json.array(InsightEngine.history(habit, today, HISTORY_DAYS).stream()
                 .map(StateSerializer::dayJson).toList()));
+        fields.put("badges", Json.array(Milestones.streakBadges(habit, today).stream().map(StateSerializer::badgeJson).toList()));
         return Json.object(fields);
     }
 
