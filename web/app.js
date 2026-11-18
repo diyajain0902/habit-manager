@@ -9,16 +9,16 @@
 // ------------------------------------------------------------------ constants & state
 
 const PALETTE = [
-  { soft: '#f7c5d5', deep: '#e48aaa', tint: '#fdeef3' }, // pink
-  { soft: '#d9cdf7', deep: '#a58ce6', tint: '#f3effd' }, // lavender
-  { soft: '#c3ead8', deep: '#63bf98', tint: '#ecf8f2' }, // mint
-  { soft: '#ffdac4', deep: '#f2a273', tint: '#fff1e8' }, // peach
-  { soft: '#c8e1f6', deep: '#78ade0', tint: '#edf5fc' }, // sky
-  { soft: '#fbe8aa', deep: '#dbb53e', tint: '#fef8e3' }, // butter
+  { soft: '#cdd4f8', deep: '#7c88e2', tint: '#eef0fd' }, // periwinkle
+  { soft: '#dccff8', deep: '#9f82e3', tint: '#f4f0fd' }, // lavender
+  { soft: '#c6e3f8', deep: '#57a5db', tint: '#edf6fd' }, // sky
+  { soft: '#ecd3f5', deep: '#be7fd6', tint: '#faf1fc' }, // lilac
+  { soft: '#c6eaf0', deep: '#4aafc2', tint: '#ecf8fa' }, // aqua
+  { soft: '#c2d3f6', deep: '#5a84d3', tint: '#edf2fd' }, // cornflower
 ];
 const WEEKDAYS = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'];
 const WEEKDAY_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const LINE_COLOR = '#f1e9ef';
+const LINE_COLOR = '#e7e9f6';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const ui = {
@@ -209,9 +209,9 @@ function render() {
 
 function emptyState() {
   return h('div', { class: 'card empty' },
-    h('div', { class: 'big', 'aria-hidden': 'true' }, '🌱'),
+    h('img', { class: 'big', src: 'bubble.svg', alt: '' }),
     h('h2', { text: 'No habits yet' }),
-    h('p', { text: 'Plant your first habit above, or load some demo data to look around.' }),
+    h('p', { text: 'Add your first habit above, or load some demo data to look around.' }),
     h('button', { class: 'btn', type: 'button', text: 'Load demo data', onclick: confirmDemo }));
 }
 
@@ -254,13 +254,13 @@ function summaryCards() {
           h('div', { class: 'value', text: `${doneToday} of ${total} done` }),
           h('div', { class: 'sub', text: mood }))),
       h('div', { class: 'card stat-card' },
-        h('div', { class: 'stat-icon', style: 'background:var(--peach)', 'aria-hidden': 'true' }, '🔥'),
+        h('div', { class: 'stat-icon', style: 'background:var(--lilac)', 'aria-hidden': 'true' }, '🔥'),
         h('div', {},
           h('div', { class: 'label', text: 'Hottest streak' }),
           h('div', { class: 'value', text: best ? `${best.currentStreak} day${best.currentStreak === 1 ? '' : 's'}` : '–' }),
           h('div', { class: 'sub', text: best && best.currentStreak > 0 ? best.name : 'Check in to start one' }))),
       h('div', { class: 'card stat-card' },
-        h('div', { class: 'stat-icon', style: `background:${attention.length ? 'var(--pink)' : 'var(--mint)'}`, 'aria-hidden': 'true' },
+        h('div', { class: 'stat-icon', style: `background:${attention.length ? 'var(--lilac)' : 'var(--aqua)'}`, 'aria-hidden': 'true' },
           attention.length ? '🌧️' : '🌈'),
         h('div', {},
           h('div', { class: 'label', text: 'Needs some love' }),
@@ -274,9 +274,9 @@ function progressRing(done, total) {
   const circumference = 2 * Math.PI * r;
   const fraction = total ? done / total : 0;
   return s('svg', { width: 56, height: 56, viewBox: '0 0 56 56', role: 'img', 'aria-label': `${done} of ${total} done today` },
-    s('circle', { cx: 28, cy: 28, r, fill: 'none', stroke: 'var(--mint)', 'stroke-width': 7, opacity: 0.45 }),
+    s('circle', { cx: 28, cy: 28, r, fill: 'none', stroke: 'var(--periwinkle)', 'stroke-width': 7, opacity: 0.45 }),
     fraction > 0 ? s('circle', {
-      cx: 28, cy: 28, r, fill: 'none', stroke: 'var(--mint-deep)', 'stroke-width': 7, 'stroke-linecap': 'round',
+      cx: 28, cy: 28, r, fill: 'none', stroke: 'var(--periwinkle-deep)', 'stroke-width': 7, 'stroke-linecap': 'round',
       'stroke-dasharray': `${circumference * fraction} ${circumference}`, transform: 'rotate(-90 28 28)',
     }) : null,
     s('text', { x: 28, y: 29, 'text-anchor': 'middle', 'dominant-baseline': 'middle', 'font-size': 13, 'font-weight': 800, fill: 'var(--ink)' },
@@ -292,7 +292,7 @@ function addHabitForm() {
     try {
       await request('POST', '/api/habits/add', { name });
       render();
-      toast(`"${name}" planted 🌱`);
+      toast(`"${name}" added 🫧`);
     } catch (e) {
       toast(e.message, true);
     }
@@ -466,7 +466,7 @@ function renderHighlights() {
     overviewFacts(today),
     h('div', { class: 'grid grid-2', style: 'margin-top:16px' },
       chartCard('Streaks', 'Current streak vs. personal best', streakChart(),
-        legend([['Thick bar = current streak', '#b3a9bf'], ['Thin bar = best ever', '#e6e0ea']])),
+        legend([['Thick bar = current streak', '#a9aed0'], ['Thin bar = best ever', '#dfe2f3']])),
       chartCard('Completion', 'Share of days done since each habit started', completionDonuts())),
     h('div', { style: 'margin-top:16px' },
       chartCard('Daily check-ins', 'Habits completed each day over the last 30 days', trendChart(today))),
@@ -508,12 +508,12 @@ function overviewFacts(today) {
 
   const strongest = findHabit(ui.data.summary.strongest);
   const facts = [
-    ['🌸', 'Total check-ins', String(totalCheckIns), 'across all habits'],
+    ['💙', 'Total check-ins', String(totalCheckIns), 'across all habits'],
     ['🏆', 'Best streak ever', `${best.longestStreak} days`, best.name],
     ['💎', 'Most consistent', strongest ? `${strongest.completion}%` : '–', strongest ? strongest.name : ''],
     ['🌟', 'Perfect days', String(perfectDays), 'every habit done, last 30 days'],
   ];
-  const tints = ['var(--pink)', 'var(--butter)', 'var(--sky)', 'var(--mint)'];
+  const tints = ['var(--lavender)', 'var(--periwinkle)', 'var(--sky)', 'var(--aqua)'];
   return h('div', { class: 'grid grid-4' }, facts.map(([icon, label, value, sub], i) =>
     h('div', { class: 'card stat-card' },
       h('div', { class: 'stat-icon', style: `background:${tints[i]}`, 'aria-hidden': 'true' }, icon),
@@ -594,20 +594,20 @@ function trendChart(today) {
     : null));
   const dots = points.map((p, i) => s('circle', {
     cx: x(i), cy: y(p.done), r: p.active && p.done === p.active ? 5 : 3.5,
-    fill: p.active && p.done === p.active ? '#e48aaa' : '#ffffff', stroke: '#a58ce6', 'stroke-width': 2,
+    fill: p.active && p.done === p.active ? '#57a5db' : '#ffffff', stroke: '#9f82e3', 'stroke-width': 2,
   }, tooltip(`${formatDate(p.date, { weekday: 'short', month: 'short', day: 'numeric' })}: ${p.done} of ${p.active} done`)));
 
   return h('div', {},
     s('svg', { class: 'chart', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Daily check-ins over the last 30 days' },
       s('defs', {}, s('linearGradient', { id: 'trend-fill', x1: 0, y1: 0, x2: 0, y2: 1 },
-        s('stop', { offset: '0%', 'stop-color': '#d9cdf7', 'stop-opacity': 0.9 }),
-        s('stop', { offset: '100%', 'stop-color': '#f7c5d5', 'stop-opacity': 0.15 }))),
+        s('stop', { offset: '0%', 'stop-color': '#dccff8', 'stop-opacity': 0.9 }),
+        s('stop', { offset: '100%', 'stop-color': '#c6e3f8', 'stop-opacity': 0.15 }))),
       grid,
       s('path', { d: area, fill: 'url(#trend-fill)' }),
-      s('path', { d: line, fill: 'none', stroke: '#a58ce6', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }),
+      s('path', { d: line, fill: 'none', stroke: '#9f82e3', 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }),
       dots,
       xLabels),
-    legend([['Habits done', '#a58ce6'], ['Perfect day (pink dot)', '#e48aaa']]));
+    legend([['Habits done', '#9f82e3'], ['Perfect day (blue dot)', '#57a5db']]));
 }
 
 /** Vertical bars Mon–Sun with the weekday completion rate. Best day is highlighted. */

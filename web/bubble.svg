@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="bubble-body" cx="38%" cy="32%" r="72%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="35%" stop-color="#e6e9fd"/>
+      <stop offset="75%" stop-color="#c9d0f7"/>
+      <stop offset="100%" stop-color="#bcaaf0"/>
+    </radialGradient>
+    <linearGradient id="bubble-rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8fc3ec"/>
+      <stop offset="100%" stop-color="#a98be4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- main bubble -->
+  <circle cx="30" cy="34" r="24" fill="url(#bubble-body)" stroke="url(#bubble-rim)" stroke-width="2.5"/>
+  <path d="M15.5 27 A16 16 0 0 1 25.5 17" fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round"/>
+  <circle cx="14.2" cy="32.5" r="1.9" fill="#ffffff"/>
+
+  <!-- face -->
+  <ellipse cx="23" cy="36" rx="2.3" ry="2.9" fill="#3f4370"/>
+  <ellipse cx="37" cy="36" rx="2.3" ry="2.9" fill="#3f4370"/>
+  <circle cx="23.9" cy="34.9" r="0.85" fill="#ffffff"/>
+  <circle cx="37.9" cy="34.9" r="0.85" fill="#ffffff"/>
+  <ellipse cx="18.2" cy="41.6" rx="3.3" ry="2" fill="#e3b6f0" opacity="0.9"/>
+  <ellipse cx="41.8" cy="41.6" rx="3.3" ry="2" fill="#e3b6f0" opacity="0.9"/>
+  <path d="M27.4 40.6 Q30 43.4 32.6 40.6" fill="none" stroke="#3f4370" stroke-width="1.7" stroke-linecap="round"/>
+
+  <!-- tiny floating bubbles -->
+  <circle cx="54" cy="13" r="6" fill="#e8f3fd" stroke="#8fc3ec" stroke-width="1.8"/>
+  <path d="M51 11.4 A3.6 3.6 0 0 1 53.6 9.2" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+  <circle cx="57.5" cy="26.5" r="3" fill="#f0eafd" stroke="#a98be4" stroke-width="1.5"/>
+</svg>
